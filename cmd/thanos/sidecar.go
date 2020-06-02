@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package main
 
 import (
@@ -14,12 +17,14 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/exthttp"
+	"github.com/thanos-io/thanos/pkg/extprom"
 	thanosmodel "github.com/thanos-io/thanos/pkg/model"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/prober"
@@ -72,7 +77,7 @@ func registerSidecar(m map[string]setupFunc, app *kingpin.Application) {
 	minTime := thanosmodel.TimeOrDuration(cmd.Flag("min-time", "Start of time range limit to serve. Thanos sidecar will serve only metrics, which happened later than this value. Option can be a constant time in RFC3339 format or time duration relative to current time, such as -1d or 2h45m. Valid duration units are ms, s, m, h, d, w, y.").
 		Default("0000-01-01T00:00:00Z"))
 
-	m[component.Sidecar.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ bool) error {
+	m[component.Sidecar.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ <-chan struct{}, _ bool) error {
 		rl := reloader.New(
 			log.With(logger, "component", "reloader"),
 			reloader.ReloadURLFromBase(*promURL),
@@ -154,9 +159,15 @@ func runSidecar(
 		uploads = false
 	}
 
-	// Initiate HTTP listener providing metrics endpoint and readiness/liveness probes.
-	statusProber := prober.New(comp, logger, prometheus.WrapRegistererWithPrefix("thanos_", reg))
-	srv := httpserver.New(logger, reg, comp, statusProber,
+	grpcProbe := prober.NewGRPC()
+	httpProbe := prober.NewHTTP()
+	statusProber := prober.Combine(
+		httpProbe,
+		grpcProbe,
+		prober.NewInstrumentation(comp, logger, extprom.WrapRegistererWithPrefix("thanos_", reg)),
+	)
+
+	srv := httpserver.New(logger, reg, comp, httpProbe,
 		httpserver.WithListen(httpBindAddr),
 		httpserver.WithGracePeriod(httpGracePeriod),
 	)
@@ -174,15 +185,14 @@ func runSidecar(
 
 	// Setup all the concurrent groups.
 	{
-		promUp := prometheus.NewGauge(prometheus.GaugeOpts{
+		promUp := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 			Name: "thanos_sidecar_prometheus_up",
 			Help: "Boolean indicator whether the sidecar can reach its Prometheus peer.",
 		})
-		lastHeartbeat := prometheus.NewGauge(prometheus.GaugeOpts{
+		lastHeartbeat := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
 			Name: "thanos_sidecar_last_heartbeat_success_time_seconds",
 			Help: "Second timestamp of the last successful heartbeat.",
 		})
-		reg.MustRegister(promUp, lastHeartbeat)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		g.Add(func() error {
@@ -213,7 +223,7 @@ func runSidecar(
 				)
 				promUp.Set(1)
 				statusProber.Ready()
-				lastHeartbeat.Set(float64(time.Now().UnixNano()) / 1e9)
+				lastHeartbeat.SetToCurrentTime()
 				return nil
 			})
 			if err != nil {
@@ -235,7 +245,7 @@ func runSidecar(
 					promUp.Set(0)
 				} else {
 					promUp.Set(1)
-					lastHeartbeat.Set(float64(time.Now().UnixNano()) / 1e9)
+					lastHeartbeat.SetToCurrentTime()
 				}
 
 				return nil
@@ -269,7 +279,7 @@ func runSidecar(
 			return errors.Wrap(err, "setup gRPC server")
 		}
 
-		s := grpcserver.New(logger, reg, tracer, comp, promStore,
+		s := grpcserver.New(logger, reg, tracer, comp, grpcProbe, promStore,
 			grpcserver.WithListen(grpcBindAddr),
 			grpcserver.WithGracePeriod(grpcGracePeriod),
 			grpcserver.WithTLSConfig(tlsCfg),

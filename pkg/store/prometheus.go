@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package store
 
 import (
@@ -12,8 +15,10 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -23,13 +28,14 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/prompb"
+	"github.com/prometheus/prometheus/pkg/timestamp"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/exthttp"
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
+	"github.com/thanos-io/thanos/pkg/store/storepb/prompb"
 	"github.com/thanos-io/thanos/pkg/tracing"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -172,12 +178,7 @@ func (p *PrometheusStore) Series(r *storepb.SeriesRequest, s storepb.Store_Serie
 			for k, v := range lbm {
 				lset = append(lset, storepb.Label{Name: k, Value: v})
 			}
-			for _, l := range externalLabels {
-				lset = append(lset, storepb.Label{
-					Name:  l.Name,
-					Value: l.Value,
-				})
-			}
+			lset = append(lset, storepb.PromLabelsToLabelsUnsafe(externalLabels)...)
 			sort.Slice(lset, func(i, j int) bool {
 				return lset[i].Name < lset[j].Name
 			})
@@ -360,7 +361,7 @@ func (p *PrometheusStore) handleStreamedPrometheusResponse(s storepb.Store_Serie
 	return nil
 }
 
-func (p *PrometheusStore) fetchSampledResponse(ctx context.Context, resp *http.Response) (*prompb.ReadResponse, error) {
+func (p *PrometheusStore) fetchSampledResponse(ctx context.Context, resp *http.Response) (_ *prompb.ReadResponse, err error) {
 	defer runutil.ExhaustCloseWithLogOnErr(p.logger, resp.Body, "prom series request body")
 
 	b := p.getBuffer()
@@ -369,21 +370,24 @@ func (p *PrometheusStore) fetchSampledResponse(ctx context.Context, resp *http.R
 	if _, err := io.Copy(buf, resp.Body); err != nil {
 		return nil, errors.Wrap(err, "copy response")
 	}
-	spanSnappyDecode, ctx := tracing.StartSpan(ctx, "decompress_response")
+
 	sb := p.getBuffer()
-	decomp, err := snappy.Decode(*sb, buf.Bytes())
-	spanSnappyDecode.Finish()
+	var decomp []byte
+	tracing.DoInSpan(ctx, "decompress_response", func(ctx context.Context) {
+		decomp, err = snappy.Decode(*sb, buf.Bytes())
+	})
 	defer p.putBuffer(sb)
 	if err != nil {
 		return nil, errors.Wrap(err, "decompress response")
 	}
 
 	var data prompb.ReadResponse
-	spanUnmarshal, _ := tracing.StartSpan(ctx, "unmarshal_response")
-	if err := proto.Unmarshal(decomp, &data); err != nil {
+	tracing.DoInSpan(ctx, "unmarshal_response", func(ctx context.Context) {
+		err = proto.Unmarshal(decomp, &data)
+	})
+	if err != nil {
 		return nil, errors.Wrap(err, "unmarshal response")
 	}
-	spanUnmarshal.Finish()
 	if len(data.Results) != 1 {
 		return nil, errors.Errorf("unexpected result size %d", len(data.Results))
 	}
@@ -417,13 +421,18 @@ func (p *PrometheusStore) chunkSamples(series *prompb.TimeSeries, maxSamplesPerC
 	return chks, nil
 }
 
-func (p *PrometheusStore) startPromSeries(ctx context.Context, q *prompb.Query) (*http.Response, error) {
+func (p *PrometheusStore) startPromSeries(ctx context.Context, q *prompb.Query) (presp *http.Response, err error) {
 	reqb, err := proto.Marshal(&prompb.ReadRequest{
 		Queries:               []*prompb.Query{q},
 		AcceptedResponseTypes: p.remoteReadAcceptableResponses,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "marshal read request")
+	}
+
+	qjson, err := json.Marshal(q)
+	if err != nil {
+		return nil, errors.Wrap(err, "json encode query for tracing")
 	}
 
 	u := *p.base
@@ -436,13 +445,13 @@ func (p *PrometheusStore) startPromSeries(ctx context.Context, q *prompb.Query) 
 	preq.Header.Add("Content-Encoding", "snappy")
 	preq.Header.Set("Content-Type", "application/x-stream-protobuf")
 	preq.Header.Set("User-Agent", userAgent)
-	spanReqDo, ctx := tracing.StartSpan(ctx, "query_prometheus_request")
-	preq = preq.WithContext(ctx)
-	presp, err := p.client.Do(preq)
+	tracing.DoInSpan(ctx, "query_prometheus_request", func(ctx context.Context) {
+		preq = preq.WithContext(ctx)
+		presp, err = p.client.Do(preq)
+	}, opentracing.Tag{Key: "prometheus.query", Value: string(qjson)})
 	if err != nil {
 		return nil, errors.Wrap(err, "send request")
 	}
-	spanReqDo.Finish()
 	if presp.StatusCode/100 != 2 {
 		// Best effort read.
 		b, err := ioutil.ReadAll(presp.Body)
@@ -504,32 +513,34 @@ func (p *PrometheusStore) encodeChunk(ss []prompb.Sample) (storepb.Chunk_Encodin
 
 // translateAndExtendLabels transforms a metrics into a protobuf label set. It additionally
 // attaches the given labels to it, overwriting existing ones on collision.
+// Both input labels are expected to be sorted.
+//
+// NOTE(bwplotka): Don't use modify passed slices as we reuse underlying memory.
 func (p *PrometheusStore) translateAndExtendLabels(m []prompb.Label, extend labels.Labels) []storepb.Label {
+	pbLabels := storepb.PrompbLabelsToLabelsUnsafe(m)
+	pbExtend := storepb.PromLabelsToLabelsUnsafe(extend)
+
 	lset := make([]storepb.Label, 0, len(m)+len(extend))
+	ei := 0
 
-	for _, l := range m {
-		if extend.Get(l.Name) != "" {
-			continue
+Outer:
+	for _, l := range pbLabels {
+		for ei < len(pbExtend) {
+			if l.Name < pbExtend[ei].Name {
+				break
+			}
+			lset = append(lset, pbExtend[ei])
+			ei++
+			if l.Name == pbExtend[ei-1].Name {
+				continue Outer
+			}
 		}
-		lset = append(lset, storepb.Label{
-			Name:  l.Name,
-			Value: l.Value,
-		})
+		lset = append(lset, l)
 	}
-
-	return extendLset(lset, extend)
-}
-
-func extendLset(lset []storepb.Label, extend labels.Labels) []storepb.Label {
-	for _, l := range extend {
-		lset = append(lset, storepb.Label{
-			Name:  l.Name,
-			Value: l.Value,
-		})
+	for ei < len(pbExtend) {
+		lset = append(lset, pbExtend[ei])
+		ei++
 	}
-	sort.Slice(lset, func(i, j int) bool {
-		return lset[i].Name < lset[j].Name
-	})
 	return lset
 }
 
@@ -663,9 +674,9 @@ func (p *PrometheusStore) seriesLabels(ctx context.Context, matchers []storepb.L
 	}
 
 	q.Add("match[]", metric)
+	q.Add("start", formatTime(timestamp.Time(startTime)))
+	q.Add("end", formatTime(timestamp.Time(endTime)))
 	u.RawQuery = q.Encode()
-	q.Add("start", string(startTime))
-	q.Add("end", string(endTime))
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
@@ -714,4 +725,8 @@ func (p *PrometheusStore) seriesLabels(ctx context.Context, matchers []storepb.L
 	}
 
 	return m.Data, nil
+}
+
+func formatTime(t time.Time) string {
+	return strconv.FormatFloat(float64(t.Unix())+float64(t.Nanosecond())/1e9, 'f', -1, 64)
 }

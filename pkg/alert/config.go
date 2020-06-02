@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package alert
 
 import (
@@ -123,6 +126,7 @@ func BuildAlertmanagerConfig(address string, timeout time.Duration) (Alertmanage
 			Scheme:          scheme,
 			StaticAddresses: []string{host},
 		},
-		Timeout: model.Duration(timeout),
+		Timeout:    model.Duration(timeout),
+		APIVersion: APIv1,
 	}, nil
 }

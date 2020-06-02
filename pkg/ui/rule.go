@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package ui
 
 import (
@@ -20,20 +23,21 @@ import (
 type Rule struct {
 	*BaseUI
 
-	flagsMap map[string]string
+	externalPrefix, prefixHeader string
 
 	ruleManager *thanosrule.Manager
 	queryURL    string
 	reg         prometheus.Registerer
 }
 
-func NewRuleUI(logger log.Logger, reg prometheus.Registerer, ruleManager *thanosrule.Manager, queryURL string, flagsMap map[string]string) *Rule {
+func NewRuleUI(logger log.Logger, reg prometheus.Registerer, ruleManager *thanosrule.Manager, queryURL string, externalPrefix, prefixHeader string) *Rule {
 	return &Rule{
-		BaseUI:      NewBaseUI(logger, "rule_menu.html", ruleTmplFuncs(queryURL)),
-		flagsMap:    flagsMap,
-		ruleManager: ruleManager,
-		queryURL:    queryURL,
-		reg:         reg,
+		BaseUI:         NewBaseUI(logger, "rule_menu.html", ruleTmplFuncs(queryURL)),
+		externalPrefix: externalPrefix,
+		prefixHeader:   prefixHeader,
+		ruleManager:    ruleManager,
+		queryURL:       queryURL,
+		reg:            reg,
 	}
 }
 
@@ -130,14 +134,14 @@ func (ru *Rule) alerts(w http.ResponseWriter, r *http.Request) {
 		Counts: alertCounts(groups),
 	}
 
-	prefix := GetWebPrefix(ru.logger, ru.flagsMap, r)
+	prefix := GetWebPrefix(ru.logger, ru.externalPrefix, ru.prefixHeader, r)
 
 	// TODO(bwplotka): Update HTML to include partial response.
 	ru.executeTemplate(w, "alerts.html", prefix, alertStatus)
 }
 
 func (ru *Rule) rules(w http.ResponseWriter, r *http.Request) {
-	prefix := GetWebPrefix(ru.logger, ru.flagsMap, r)
+	prefix := GetWebPrefix(ru.logger, ru.externalPrefix, ru.prefixHeader, r)
 
 	// TODO(bwplotka): Update HTML to include partial response.
 	ru.executeTemplate(w, "rules.html", prefix, ru.ruleManager)
@@ -145,7 +149,7 @@ func (ru *Rule) rules(w http.ResponseWriter, r *http.Request) {
 
 // Root redirects / requests to /graph, taking into account the path prefix value.
 func (ru *Rule) root(w http.ResponseWriter, r *http.Request) {
-	prefix := GetWebPrefix(ru.logger, ru.flagsMap, r)
+	prefix := GetWebPrefix(ru.logger, ru.externalPrefix, ru.prefixHeader, r)
 
 	http.Redirect(w, r, path.Join(prefix, "/alerts"), http.StatusFound)
 }

@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package main
 
 import (
@@ -5,13 +8,9 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"os"
-	"os/signal"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-kit/kit/log"
@@ -20,12 +19,14 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/storage/tsdb"
+	tsdberrors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/thanos-io/thanos/pkg/alert"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
@@ -113,7 +114,7 @@ func registerRule(m map[string]setupFunc, app *kingpin.Application) {
 	dnsSDResolver := cmd.Flag("query.sd-dns-resolver", "Resolver to use. Possible options: [golang, miekgdns]").
 		Default("golang").Hidden().String()
 
-	m[comp.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ bool) error {
+	m[comp.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, reload <-chan struct{}, _ bool) error {
 		lset, err := parseFlagLabels(*labelStrs)
 		if err != nil {
 			return errors.Wrap(err, "parse labels")
@@ -165,6 +166,7 @@ func registerRule(m map[string]setupFunc, app *kingpin.Application) {
 			logger,
 			reg,
 			tracer,
+			reload,
 			lset,
 			*alertmgrs,
 			*alertmgrsTimeout,
@@ -199,6 +201,50 @@ func registerRule(m map[string]setupFunc, app *kingpin.Application) {
 	}
 }
 
+// RuleMetrics defines thanos rule metrics.
+type RuleMetrics struct {
+	configSuccess     prometheus.Gauge
+	configSuccessTime prometheus.Gauge
+	duplicatedQuery   prometheus.Counter
+	rulesLoaded       *prometheus.GaugeVec
+	ruleEvalWarnings  *prometheus.CounterVec
+}
+
+func newRuleMetrics(reg *prometheus.Registry) *RuleMetrics {
+	m := new(RuleMetrics)
+
+	factory := promauto.With(reg)
+	m.configSuccess = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "thanos_rule_config_last_reload_successful",
+		Help: "Whether the last configuration reload attempt was successful.",
+	})
+	m.configSuccessTime = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "thanos_rule_config_last_reload_success_timestamp_seconds",
+		Help: "Timestamp of the last successful configuration reload.",
+	})
+	m.duplicatedQuery = factory.NewCounter(prometheus.CounterOpts{
+		Name: "thanos_rule_duplicated_query_addresses_total",
+		Help: "The number of times a duplicated query addresses is detected from the different configs in rule.",
+	})
+	m.rulesLoaded = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "thanos_rule_loaded_rules",
+			Help: "Loaded rules partitioned by file and group.",
+		},
+		[]string{"strategy", "file", "group"},
+	)
+	m.ruleEvalWarnings = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "thanos_rule_evaluation_with_warnings_total",
+			Help: "The total number of rule evaluation that were successful but had warnings which can indicate partial error.",
+		}, []string{"strategy"},
+	)
+	m.ruleEvalWarnings.WithLabelValues(strings.ToLower(storepb.PartialResponseStrategy_ABORT.String()))
+	m.ruleEvalWarnings.WithLabelValues(strings.ToLower(storepb.PartialResponseStrategy_WARN.String()))
+
+	return m
+}
+
 // runRule runs a rule evaluation component that continuously evaluates alerting and recording
 // rules. It sends alert notifications and writes TSDB data for results like a regular Prometheus server.
 func runRule(
@@ -206,6 +252,7 @@ func runRule(
 	logger log.Logger,
 	reg *prometheus.Registry,
 	tracer opentracing.Tracer,
+	reloadSignal <-chan struct{},
 	lset labels.Labels,
 	alertmgrURLs []string,
 	alertmgrsTimeout time.Duration,
@@ -237,52 +284,19 @@ func runRule(
 	dnsSDResolver string,
 	comp component.Component,
 ) error {
-	configSuccess := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "thanos_rule_config_last_reload_successful",
-		Help: "Whether the last configuration reload attempt was successful.",
-	})
-	configSuccessTime := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "thanos_rule_config_last_reload_success_timestamp_seconds",
-		Help: "Timestamp of the last successful configuration reload.",
-	})
-	duplicatedQuery := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "thanos_rule_duplicated_query_address",
-		Help: "The number of times a duplicated query addresses is detected from the different configs in rule",
-	})
-	rulesLoaded := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "thanos_rule_loaded_rules",
-			Help: "Loaded rules partitioned by file and group",
-		},
-		[]string{"strategy", "file", "group"},
-	)
-	ruleEvalWarnings := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "thanos_rule_evaluation_with_warnings_total",
-			Help: "The total number of rule evaluation that were successful but had warnings which can indicate partial error.",
-		}, []string{"strategy"},
-	)
-	ruleEvalWarnings.WithLabelValues(strings.ToLower(storepb.PartialResponseStrategy_ABORT.String()))
-	ruleEvalWarnings.WithLabelValues(strings.ToLower(storepb.PartialResponseStrategy_WARN.String()))
-
-	reg.MustRegister(configSuccess)
-	reg.MustRegister(configSuccessTime)
-	reg.MustRegister(duplicatedQuery)
-	reg.MustRegister(rulesLoaded)
-	reg.MustRegister(ruleEvalWarnings)
+	metrics := newRuleMetrics(reg)
 
 	var queryCfg []query.Config
+	var err error
 	if len(queryConfigYAML) > 0 {
-		var err error
 		queryCfg, err = query.LoadConfigs(queryConfigYAML)
 		if err != nil {
 			return err
 		}
 	} else {
-		for _, addr := range queryAddrs {
-			if addr == "" {
-				return errors.New("static querier address cannot be empty")
-			}
+		queryCfg, err = query.BuildQueryConfig(queryAddrs)
+		if err != nil {
+			return err
 		}
 
 		// Build the query configuration from the legacy query flags.
@@ -292,16 +306,15 @@ func runRule(
 				Files:           querySDFiles,
 				RefreshInterval: model.Duration(querySDInterval),
 			})
-		}
-		queryCfg = append(queryCfg,
-			query.Config{
-				EndpointsConfig: http_util.EndpointsConfig{
-					Scheme:          "http",
-					StaticAddresses: queryAddrs,
-					FileSDConfigs:   fileSDConfigs,
+			queryCfg = append(queryCfg,
+				query.Config{
+					EndpointsConfig: http_util.EndpointsConfig{
+						Scheme:        "http",
+						FileSDConfigs: fileSDConfigs,
+					},
 				},
-			},
-		)
+			)
+		}
 	}
 
 	queryProvider := dns.NewProvider(
@@ -433,7 +446,7 @@ func runRule(
 			opts := opts
 			opts.Registerer = extprom.WrapRegistererWith(prometheus.Labels{"strategy": strings.ToLower(s.String())}, reg)
 			opts.Context = ctx
-			opts.QueryFunc = queryFunc(logger, queryClients, duplicatedQuery, ruleEvalWarnings, s)
+			opts.QueryFunc = queryFunc(logger, queryClients, metrics.duplicatedQuery, metrics.ruleEvalWarnings, s)
 
 			mgr := rules.NewManager(&opts)
 			ruleMgr.SetRuleManager(s, mgr)
@@ -456,7 +469,9 @@ func runRule(
 
 		g.Add(func() error {
 			for {
-				sdr.Send(ctx, alertQ.Pop(ctx.Done()))
+				tracing.DoInSpan(ctx, "/send_alerts", func(ctx context.Context) {
+					sdr.Send(ctx, alertQ.Pop(ctx.Done()))
+				})
 
 				select {
 				case <-ctx.Done():
@@ -470,75 +485,44 @@ func runRule(
 	}
 
 	// Handle reload and termination interrupts.
-	reload := make(chan struct{}, 1)
+	reloadWebhandler := make(chan chan error)
 	{
-		cancel := make(chan struct{})
-		reload <- struct{}{} // Initial reload.
-
+		ctx, cancel := context.WithCancel(context.Background())
 		g.Add(func() error {
+			// Initialize rules.
+			if err := reloadRules(logger, ruleFiles, ruleMgr, evalInterval, metrics); err != nil {
+				level.Error(logger).Log("msg", "initialize rules failed", "err", err)
+				return err
+			}
 			for {
 				select {
-				case <-cancel:
-					return errors.New("canceled")
-				case <-reload:
-				}
-
-				level.Debug(logger).Log("msg", "configured rule files", "files", strings.Join(ruleFiles, ","))
-				var files []string
-				for _, pat := range ruleFiles {
-					fs, err := filepath.Glob(pat)
+				case <-reloadSignal:
+					if err := reloadRules(logger, ruleFiles, ruleMgr, evalInterval, metrics); err != nil {
+						level.Error(logger).Log("msg", "reload rules by sighup failed", "err", err)
+					}
+				case reloadMsg := <-reloadWebhandler:
+					err := reloadRules(logger, ruleFiles, ruleMgr, evalInterval, metrics)
 					if err != nil {
-						// The only error can be a bad pattern.
-						level.Error(logger).Log("msg", "retrieving rule files failed. Ignoring file.", "pattern", pat, "err", err)
-						continue
+						level.Error(logger).Log("msg", "reload rules by webhandler failed", "err", err)
 					}
-
-					files = append(files, fs...)
-				}
-
-				level.Info(logger).Log("msg", "reload rule files", "numFiles", len(files))
-
-				if err := ruleMgr.Update(evalInterval, files); err != nil {
-					configSuccess.Set(0)
-					level.Error(logger).Log("msg", "reloading rules failed", "err", err)
-					continue
-				}
-
-				configSuccess.Set(1)
-				configSuccessTime.Set(float64(time.Now().UnixNano()) / 1e9)
-
-				rulesLoaded.Reset()
-				for _, group := range ruleMgr.RuleGroups() {
-					rulesLoaded.WithLabelValues(group.PartialResponseStrategy.String(), group.File(), group.Name()).Set(float64(len(group.Rules())))
-				}
-
-			}
-		}, func(error) {
-			close(cancel)
-		})
-	}
-	{
-		cancel := make(chan struct{})
-
-		g.Add(func() error {
-			c := make(chan os.Signal, 1)
-			for {
-				signal.Notify(c, syscall.SIGHUP)
-				select {
-				case <-c:
-					select {
-					case reload <- struct{}{}:
-					default:
-					}
-				case <-cancel:
-					return errors.New("canceled")
+					reloadMsg <- err
+				case <-ctx.Done():
+					return ctx.Err()
 				}
 			}
 		}, func(error) {
-			close(cancel)
+			cancel()
 		})
 	}
-	statusProber := prober.New(comp, logger, prometheus.WrapRegistererWithPrefix("thanos_", reg))
+
+	grpcProbe := prober.NewGRPC()
+	httpProbe := prober.NewHTTP()
+	statusProber := prober.Combine(
+		httpProbe,
+		grpcProbe,
+		prober.NewInstrumentation(comp, logger, extprom.WrapRegistererWithPrefix("thanos_", reg)),
+	)
+
 	// Start gRPC server.
 	{
 		store := store.NewTSDBStore(logger, reg, db, component.Rule, lset)
@@ -548,7 +532,7 @@ func runRule(
 			return errors.Wrap(err, "setup gRPC server")
 		}
 
-		s := grpcserver.New(logger, reg, tracer, comp, store,
+		s := grpcserver.New(logger, reg, tracer, comp, grpcProbe, store,
 			grpcserver.WithListen(grpcBindAddr),
 			grpcserver.WithGracePeriod(grpcGracePeriod),
 			grpcserver.WithTLSConfig(tlsCfg),
@@ -566,32 +550,34 @@ func runRule(
 	{
 		router := route.New()
 
+		// RoutePrefix must always start with '/'.
+		webRoutePrefix = "/" + strings.Trim(webRoutePrefix, "/")
+
 		// Redirect from / to /webRoutePrefix.
-		if webRoutePrefix != "" {
+		if webRoutePrefix != "/" {
 			router.Get("/", func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, webRoutePrefix, http.StatusFound)
 			})
+			router = router.WithPrefix(webRoutePrefix)
 		}
 
-		router.WithPrefix(webRoutePrefix).Post("/-/reload", func(w http.ResponseWriter, r *http.Request) {
-			reload <- struct{}{}
+		router.Post("/-/reload", func(w http.ResponseWriter, r *http.Request) {
+			reloadMsg := make(chan error)
+			reloadWebhandler <- reloadMsg
+			if err := <-reloadMsg; err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		})
-
-		flagsMap := map[string]string{
-			// TODO(bplotka in PR #513 review): pass all flags, not only the flags needed by prefix rewriting.
-			"web.external-prefix": webExternalPrefix,
-			"web.prefix-header":   webPrefixHeaderName,
-		}
 
 		ins := extpromhttp.NewInstrumentationMiddleware(reg)
 
-		ui.NewRuleUI(logger, reg, ruleMgr, alertQueryURL.String(), flagsMap).Register(router.WithPrefix(webRoutePrefix), ins)
+		// TODO(bplotka in PR #513 review): pass all flags, not only the flags needed by prefix rewriting.
+		ui.NewRuleUI(logger, reg, ruleMgr, alertQueryURL.String(), webExternalPrefix, webPrefixHeaderName).Register(router, ins)
 
 		api := v1.NewAPI(logger, reg, ruleMgr)
-		api.Register(router.WithPrefix(path.Join(webRoutePrefix, "/api/v1")), tracer, logger, ins)
+		api.Register(router.WithPrefix("/api/v1"), tracer, logger, ins)
 
-		// Initiate HTTP listener providing metrics endpoint and readiness/liveness probes.
-		srv := httpserver.New(logger, reg, comp, statusProber,
+		srv := httpserver.New(logger, reg, comp, httpProbe,
 			httpserver.WithListen(httpBindAddr),
 			httpserver.WithGracePeriod(httpGracePeriod),
 		)
@@ -629,7 +615,7 @@ func runRule(
 			}
 		}()
 
-		s := shipper.New(logger, nil, dataDir, bkt, func() labels.Labels { return lset }, metadata.RulerSource)
+		s := shipper.New(logger, reg, dataDir, bkt, func() labels.Labels { return lset }, metadata.RulerSource)
 
 		ctx, cancel := context.WithCancel(context.Background())
 
@@ -723,18 +709,18 @@ func queryFunc(
 		promClients = append(promClients, promclient.NewClient(logger, q))
 	}
 
-	return func(ctx context.Context, q string, t time.Time) (promql.Vector, error) {
+	return func(ctx context.Context, q string, t time.Time) (v promql.Vector, err error) {
 		for _, i := range rand.Perm(len(queriers)) {
 			promClient := promClients[i]
 			endpoints := removeDuplicateQueryEndpoints(logger, duplicatedQuery, queriers[i].Endpoints())
 			for _, i := range rand.Perm(len(endpoints)) {
-				span, ctx := tracing.StartSpan(ctx, spanID)
-				v, warns, err := promClient.PromqlQueryInstant(ctx, endpoints[i], q, t, promclient.QueryOptions{
-					Deduplicate:             true,
-					PartialResponseStrategy: partialResponseStrategy,
+				var warns []string
+				tracing.DoInSpan(ctx, spanID, func(ctx context.Context) {
+					v, warns, err = promClient.PromqlQueryInstant(ctx, endpoints[i], q, t, promclient.QueryOptions{
+						Deduplicate:             true,
+						PartialResponseStrategy: partialResponseStrategy,
+					})
 				})
-				span.Finish()
-
 				if err != nil {
 					level.Error(logger).Log("err", err, "query", q)
 					continue
@@ -747,7 +733,7 @@ func queryFunc(
 				return v, nil
 			}
 		}
-		return nil, errors.Errorf("no query API server reachable")
+		return nil, errors.New("no query API server reachable")
 	}
 }
 
@@ -768,4 +754,43 @@ func addDiscoveryGroups(g *run.Group, c *http_util.Client, interval time.Duratio
 	}, func(error) {
 		cancel()
 	})
+}
+
+func reloadRules(logger log.Logger,
+	ruleFiles []string,
+	ruleMgr *thanosrule.Manager,
+	evalInterval time.Duration,
+	metrics *RuleMetrics) error {
+	level.Debug(logger).Log("msg", "configured rule files", "files", strings.Join(ruleFiles, ","))
+	var (
+		errs  tsdberrors.MultiError
+		files []string
+	)
+	for _, pat := range ruleFiles {
+		fs, err := filepath.Glob(pat)
+		if err != nil {
+			// The only error can be a bad pattern.
+			errs.Add(errors.Wrapf(err, "retrieving rule files failed. Ignoring file. pattern %s", pat))
+			continue
+		}
+
+		files = append(files, fs...)
+	}
+
+	level.Info(logger).Log("msg", "reload rule files", "numFiles", len(files))
+
+	if err := ruleMgr.Update(evalInterval, files); err != nil {
+		metrics.configSuccess.Set(0)
+		errs.Add(errors.Wrap(err, "reloading rules failed"))
+		return errs.Err()
+	}
+
+	metrics.configSuccess.Set(1)
+	metrics.configSuccessTime.Set(float64(time.Now().UnixNano()) / 1e9)
+
+	metrics.rulesLoaded.Reset()
+	for _, group := range ruleMgr.RuleGroups() {
+		metrics.rulesLoaded.WithLabelValues(group.PartialResponseStrategy.String(), group.File(), group.Name()).Set(float64(len(group.Rules())))
+	}
+	return errs.Err()
 }

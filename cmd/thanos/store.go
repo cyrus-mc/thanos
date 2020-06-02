@@ -1,7 +1,12 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package main
 
 import (
 	"context"
+	"fmt"
+	"path"
 	"time"
 
 	"github.com/go-kit/kit/log"
@@ -10,11 +15,13 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/route"
 	"github.com/prometheus/prometheus/pkg/relabel"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/extprom"
+	extpromhttp "github.com/thanos-io/thanos/pkg/extprom/http"
 	"github.com/thanos-io/thanos/pkg/model"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/prober"
@@ -24,6 +31,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/store"
 	storecache "github.com/thanos-io/thanos/pkg/store/cache"
 	"github.com/thanos-io/thanos/pkg/tls"
+	"github.com/thanos-io/thanos/pkg/ui"
 	"gopkg.in/alecthomas/kingpin.v2"
 	yaml "gopkg.in/yaml.v2"
 )
@@ -47,7 +55,7 @@ func registerStore(m map[string]setupFunc, app *kingpin.Application) {
 		"YAML file that contains index cache configuration. See format details: https://thanos.io/components/store.md/#index-cache",
 		false)
 
-	chunkPoolSize := cmd.Flag("chunk-pool-size", "Maximum size of concurrently allocatable bytes for chunks.").
+	chunkPoolSize := cmd.Flag("chunk-pool-size", "Maximum size of concurrently allocatable bytes reserved strictly to reuse for chunks in memory.").
 		Default("2GB").Bytes()
 
 	maxSampleCount := cmd.Flag("store.grpc.series-sample-limit",
@@ -75,7 +83,32 @@ func registerStore(m map[string]setupFunc, app *kingpin.Application) {
 
 	selectorRelabelConf := regSelectorRelabelFlags(cmd)
 
-	m[component.Store.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, debugLogging bool) error {
+	// TODO(bwplotka): Remove in v0.13.0 if no issues.
+	disableIndexHeader := cmd.Flag("store.disable-index-header", "If specified, Store Gateway will use index-cache.json for each block instead of recreating binary index-header").
+		Hidden().Default("false").Bool()
+
+	postingOffsetsInMemSampling := cmd.Flag("store.index-header-posting-offsets-in-mem-sampling", "Controls what is the ratio of postings offsets store will hold in memory. "+
+		"Larger value will keep less offsets, which will increase CPU cycles needed for query touching those postings. It's meant for setups that want low baseline memory pressure and where less traffic is expected. "+
+		"On the contrary, smaller value will increase baseline memory usage, but improve latency slightly. 1 will keep all in memory. Default value is the same as in Prometheus which gives a good balance. This works only when --store.disable-index-header is NOT specified.").
+		Hidden().Default(fmt.Sprintf("%v", store.DefaultPostingOffsetInMemorySampling)).Int()
+
+	enablePostingsCompression := cmd.Flag("experimental.enable-index-cache-postings-compression", "If true, Store Gateway will reencode and compress postings before storing them into cache. Compressed postings take about 10% of the original size.").
+		Hidden().Default("false").Bool()
+
+	consistencyDelay := modelDuration(cmd.Flag("consistency-delay", "Minimum age of all blocks before they are being read. Set it to safe value (e.g 30m) if your object storage is eventually consistent. GCS and S3 are (roughly) strongly consistent.").
+		Default("0s"))
+
+	ignoreDeletionMarksDelay := modelDuration(cmd.Flag("ignore-deletion-marks-delay", "Duration after which the blocks marked for deletion will be filtered out while fetching blocks. "+
+		"The idea of ignore-deletion-marks-delay is to ignore blocks that are marked for deletion with some delay. This ensures store can still serve blocks that are meant to be deleted but do not have a replacement yet. "+
+		"If delete-delay duration is provided to compactor or bucket verify component, it will upload deletion-mark.json file to mark after what duration the block should be deleted rather than deleting the block straight away. "+
+		"If delete-delay is non-zero for compactor or bucket verify component, ignore-deletion-marks-delay should be set to (delete-delay)/2 so that blocks marked for deletion are filtered out while fetching blocks before being deleted from bucket. "+
+		"Default is 24h, half of the default value for --delete-delay on compactor.").
+		Default("24h"))
+
+	webExternalPrefix := cmd.Flag("web.external-prefix", "Static prefix for all HTML links and redirect URLs in the bucket web UI interface. Actual endpoints are still served on / or the web.route-prefix. This allows thanos bucket web UI to be served behind a reverse proxy that strips a URL sub-path.").Default("").String()
+	webPrefixHeaderName := cmd.Flag("web.prefix-header", "Name of HTTP request header used for dynamic prefixing of UI links and redirects. This option is ignored if web.external-prefix argument is set. Security risk: enable this option only if a reverse proxy in front of thanos is resetting the header. The --web.prefix-header=X-Forwarded-Prefix option can be useful, for example, if Thanos UI is served via Traefik reverse proxy with PathPrefixStrip option enabled, which sends the stripped prefix value in X-Forwarded-Prefix header. This allows thanos UI to be served on a sub-path.").Default("").String()
+
+	m[component.Store.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ <-chan struct{}, debugLogging bool) error {
 		if minTime.PrometheusTimestamp() > maxTime.PrometheusTimestamp() {
 			return errors.Errorf("invalid argument: --min-time '%s' can't be greater than --max-time '%s'",
 				minTime, maxTime)
@@ -98,7 +131,7 @@ func registerStore(m map[string]setupFunc, app *kingpin.Application) {
 			uint64(*indexCacheSize),
 			uint64(*chunkPoolSize),
 			uint64(*maxSampleCount),
-			int(*maxConcurrent),
+			*maxConcurrent,
 			component.Store,
 			debugLogging,
 			*syncInterval,
@@ -109,6 +142,13 @@ func registerStore(m map[string]setupFunc, app *kingpin.Application) {
 			},
 			selectorRelabelConf,
 			*advertiseCompatibilityLabel,
+			*disableIndexHeader,
+			*enablePostingsCompression,
+			time.Duration(*consistencyDelay),
+			time.Duration(*ignoreDeletionMarksDelay),
+			*webExternalPrefix,
+			*webPrefixHeaderName,
+			*postingOffsetsInMemSampling,
 		)
 	}
 }
@@ -124,14 +164,9 @@ func runStore(
 	dataDir string,
 	grpcBindAddr string,
 	grpcGracePeriod time.Duration,
-	grpcCert string,
-	grpcKey string,
-	grpcClientCA string,
-	httpBindAddr string,
+	grpcCert, grpcKey, grpcClientCA, httpBindAddr string,
 	httpGracePeriod time.Duration,
-	indexCacheSizeBytes uint64,
-	chunkPoolSizeBytes uint64,
-	maxSampleCount uint64,
+	indexCacheSizeBytes, chunkPoolSizeBytes, maxSampleCount uint64,
 	maxConcurrency int,
 	component component.Component,
 	verbose bool,
@@ -139,11 +174,21 @@ func runStore(
 	blockSyncConcurrency int,
 	filterConf *store.FilterConfig,
 	selectorRelabelConf *extflag.PathOrContent,
-	advertiseCompatibilityLabel bool,
+	advertiseCompatibilityLabel, disableIndexHeader, enablePostingsCompression bool,
+	consistencyDelay time.Duration,
+	ignoreDeletionMarksDelay time.Duration,
+	externalPrefix, prefixHeader string,
+	postingOffsetsInMemSampling int,
 ) error {
-	// Initiate HTTP listener providing metrics endpoint and readiness/liveness probes.
-	statusProber := prober.New(component, logger, prometheus.WrapRegistererWithPrefix("thanos_", reg))
-	srv := httpserver.New(logger, reg, component, statusProber,
+	grpcProbe := prober.NewGRPC()
+	httpProbe := prober.NewHTTP()
+	statusProber := prober.Combine(
+		httpProbe,
+		grpcProbe,
+		prober.NewInstrumentation(component, logger, extprom.WrapRegistererWithPrefix("thanos_", reg)),
+	)
+
+	srv := httpserver.New(logger, reg, component, httpProbe,
 		httpserver.WithListen(httpBindAddr),
 		httpserver.WithGracePeriod(httpGracePeriod),
 	)
@@ -198,7 +243,7 @@ func runStore(
 		indexCache, err = storecache.NewIndexCache(logger, indexCacheContentYaml, reg)
 	} else {
 		indexCache, err = storecache.NewInMemoryIndexCacheWithConfig(logger, reg, storecache.InMemoryIndexCacheConfig{
-			MaxSize:     storecache.Bytes(indexCacheSizeBytes),
+			MaxSize:     model.Bytes(indexCacheSizeBytes),
 			MaxItemSize: storecache.DefaultInMemoryIndexCacheConfig.MaxItemSize,
 		})
 	}
@@ -206,14 +251,22 @@ func runStore(
 		return errors.Wrap(err, "create index cache")
 	}
 
+	ignoreDeletionMarkFilter := block.NewIgnoreDeletionMarkFilter(logger, bkt, ignoreDeletionMarksDelay)
 	metaFetcher, err := block.NewMetaFetcher(logger, fetcherConcurrency, bkt, dataDir, extprom.WrapRegistererWithPrefix("thanos_", reg),
-		block.NewTimePartitionMetaFilter(filterConf.MinTime, filterConf.MaxTime).Filter,
-		block.NewLabelShardedMetaFilter(relabelConfig).Filter,
-	)
+		[]block.MetadataFilter{
+			block.NewTimePartitionMetaFilter(filterConf.MinTime, filterConf.MaxTime),
+			block.NewLabelShardedMetaFilter(relabelConfig),
+			block.NewConsistencyDelayMetaFilter(logger, consistencyDelay, extprom.WrapRegistererWithPrefix("thanos_", reg)),
+			ignoreDeletionMarkFilter,
+			block.NewDeduplicateFilter(),
+		}, nil)
 	if err != nil {
 		return errors.Wrap(err, "meta fetcher")
 	}
 
+	if !disableIndexHeader {
+		level.Info(logger).Log("msg", "index-header instead of index-cache.json enabled")
+	}
 	bs, err := store.NewBucketStore(
 		logger,
 		reg,
@@ -228,6 +281,9 @@ func runStore(
 		blockSyncConcurrency,
 		filterConf,
 		advertiseCompatibilityLabel,
+		!disableIndexHeader,
+		enablePostingsCompression,
+		postingOffsetsInMemSampling,
 	)
 	if err != nil {
 		return errors.Wrap(err, "create object storage store")
@@ -269,7 +325,7 @@ func runStore(
 			return errors.Wrap(err, "setup gRPC server")
 		}
 
-		s := grpcserver.New(logger, reg, tracer, component, bs,
+		s := grpcserver.New(logger, reg, tracer, component, grpcProbe, bs,
 			grpcserver.WithListen(grpcBindAddr),
 			grpcserver.WithGracePeriod(grpcGracePeriod),
 			grpcserver.WithTLSConfig(tlsCfg),
@@ -283,6 +339,14 @@ func runStore(
 			statusProber.NotReady(err)
 			s.Shutdown(err)
 		})
+	}
+	// Add bucket UI for loaded blocks.
+	{
+		r := route.New()
+		compactorView := ui.NewBucketUI(logger, "", path.Join(externalPrefix, "/loaded"), prefixHeader)
+		compactorView.Register(r, extpromhttp.NewInstrumentationMiddleware(reg))
+		metaFetcher.UpdateOnChange(compactorView.Set)
+		srv.Handle("/", r)
 	}
 
 	level.Info(logger).Log("msg", "starting store node")

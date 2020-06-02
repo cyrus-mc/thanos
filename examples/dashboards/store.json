@@ -2056,7 +2056,7 @@
                "thresholds": [ ],
                "timeFrom": null,
                "timeShift": null,
-               "title": "Chunk Size",
+               "title": "Chunk Size (bytes)",
                "tooltip": {
                   "shared": false,
                   "sort": 0,
@@ -2217,6 +2217,7 @@
                "dashLength": 10,
                "dashes": false,
                "datasource": "$datasource",
+               "description": "Show the size of data fetched, in bytes",
                "fill": 1,
                "id": 26,
                "legend": {
@@ -2270,7 +2271,7 @@
                "thresholds": [ ],
                "timeFrom": null,
                "timeShift": null,
-               "title": "Data Fetched",
+               "title": "Data Fetched (bytes)",
                "tooltip": {
                   "shared": false,
                   "sort": 0,
@@ -2533,7 +2534,7 @@
                "steppedLine": false,
                "targets": [
                   {
-                     "expr": "histogram_quantile(0.99, sum(rate(thanos_bucket_store_series_merge_duration_seconds_bucket_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
+                     "expr": "histogram_quantile(0.99, sum(rate(thanos_bucket_store_series_merge_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
                      "format": "time_series",
                      "intervalFactor": 2,
                      "legendFormat": "P99 {{job}}",
@@ -2541,7 +2542,7 @@
                      "step": 10
                   },
                   {
-                     "expr": "sum(rate(thanos_bucket_store_series_merge_duration_seconds_bucket_sum{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job) * 1 / sum(rate(thanos_bucket_store_series_merge_duration_seconds_bucket_count{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job)",
+                     "expr": "sum(rate(thanos_bucket_store_series_merge_duration_seconds_sum{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job) * 1 / sum(rate(thanos_bucket_store_series_merge_duration_seconds_count{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job)",
                      "format": "time_series",
                      "intervalFactor": 2,
                      "legendFormat": "mean {{job}}",
@@ -2549,7 +2550,7 @@
                      "step": 10
                   },
                   {
-                     "expr": "histogram_quantile(0.50, sum(rate(thanos_bucket_store_series_merge_duration_seconds_bucket_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
+                     "expr": "histogram_quantile(0.50, sum(rate(thanos_bucket_store_series_merge_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
                      "format": "time_series",
                      "intervalFactor": 2,
                      "legendFormat": "P50 {{job}}",
@@ -2626,7 +2627,7 @@
                "steppedLine": false,
                "targets": [
                   {
-                     "expr": "histogram_quantile(0.99, sum(rate(thanos_bucket_store_series_gate_duration_seconds_bucket_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
+                     "expr": "histogram_quantile(0.99, sum(rate(thanos_bucket_store_series_gate_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
                      "format": "time_series",
                      "intervalFactor": 2,
                      "legendFormat": "P99 {{job}}",
@@ -2634,7 +2635,7 @@
                      "step": 10
                   },
                   {
-                     "expr": "sum(rate(thanos_bucket_store_series_gate_duration_seconds_bucket_sum{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job) * 1 / sum(rate(thanos_bucket_store_series_gate_duration_seconds_bucket_count{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job)",
+                     "expr": "sum(rate(thanos_bucket_store_series_gate_duration_seconds_sum{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job) * 1 / sum(rate(thanos_bucket_store_series_gate_duration_seconds_count{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job)",
                      "format": "time_series",
                      "intervalFactor": 2,
                      "legendFormat": "mean {{job}}",
@@ -2642,7 +2643,7 @@
                      "step": 10
                   },
                   {
-                     "expr": "histogram_quantile(0.50, sum(rate(thanos_bucket_store_series_gate_duration_seconds_bucket_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
+                     "expr": "histogram_quantile(0.50, sum(rate(thanos_bucket_store_series_gate_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[$interval])) by (job, le)) * 1",
                      "format": "time_series",
                      "intervalFactor": 2,
                      "legendFormat": "P50 {{job}}",
@@ -2781,7 +2782,7 @@
                "thresholds": [ ],
                "timeFrom": null,
                "timeShift": null,
-               "title": "Memory Used",
+               "title": "Memory Used (Bytes)",
                "tooltip": {
                   "shared": false,
                   "sort": 0,

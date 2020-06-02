@@ -1,9 +1,13 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package downsample
 
 import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -104,11 +108,11 @@ func NewStreamedBlockWriter(
 // labelsValues sets and memPostings to be written on the finalize state in the end of downsampling process.
 func (w *streamedBlockWriter) WriteSeries(lset labels.Labels, chunks []chunks.Meta) error {
 	if w.finalized || w.ignoreFinalize {
-		return errors.Errorf("series can't be added, writers has been closed or internal error happened")
+		return errors.New("series can't be added, writers has been closed or internal error happened")
 	}
 
 	if len(chunks) == 0 {
-		level.Warn(w.logger).Log("empty chunks happened, skip series", lset)
+		level.Warn(w.logger).Log("msg", "empty chunks happened, skip series", "series", strings.ReplaceAll(lset.String(), "\"", "'"))
 		return nil
 	}
 

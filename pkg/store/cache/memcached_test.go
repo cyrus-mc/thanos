@@ -1,14 +1,17 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package storecache
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/fortytw2/leaktest"
 	"github.com/go-kit/kit/log"
 	"github.com/oklog/ulid"
+	"github.com/pkg/errors"
 	prom_testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/thanos-io/thanos/pkg/testutil"
@@ -16,7 +19,6 @@ import (
 
 func TestMemcachedIndexCache_FetchMultiPostings(t *testing.T) {
 	t.Parallel()
-	defer leaktest.CheckTimeout(t, 10*time.Second)()
 
 	// Init some data to conveniently define test cases later one.
 	block1 := ulid.MustNew(1, nil)

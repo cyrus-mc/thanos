@@ -165,7 +165,7 @@ local g = import '../lib/thanos-grafana-builder/builder.libsonnet';
       .addRow(
         g.row('Store Sent')
         .addPanel(
-          g.panel('Chunk Size', 'Shows size of chunks that have sent to the bucket, in bytes.') +
+          g.panel('Chunk Size (bytes)', 'Shows size of chunks that have sent to the bucket, in bytes.') +
           g.queryPanel(
             [
               'histogram_quantile(0.99, sum(rate(thanos_bucket_store_sent_chunk_size_bytes_bucket{namespace="$namespace",job=~"$job"}[$interval])) by (job, le))',
@@ -198,7 +198,7 @@ local g = import '../lib/thanos-grafana-builder/builder.libsonnet';
           )
         )
         .addPanel(
-          g.panel('Data Fetched') +
+          g.panel('Data Fetched (bytes)', 'Show the size of data fetched, in bytes') +
           g.queryPanel(
             [
               'thanos_bucket_store_series_data_fetched{namespace="$namespace",job=~"$job",quantile="0.99"}',
@@ -234,11 +234,11 @@ local g = import '../lib/thanos-grafana-builder/builder.libsonnet';
         )
         .addPanel(
           g.panel('Merge', 'Shows how long has it taken to merge series.') +
-          g.latencyPanel('thanos_bucket_store_series_merge_duration_seconds_bucket', 'namespace="$namespace",job=~"$job"')
+          g.latencyPanel('thanos_bucket_store_series_merge_duration_seconds', 'namespace="$namespace",job=~"$job"')
         )
         .addPanel(
           g.panel('Gate', 'Shows how long has it taken for a series to wait at the gate.') +
-          g.latencyPanel('thanos_bucket_store_series_gate_duration_seconds_bucket', 'namespace="$namespace",job=~"$job"')
+          g.latencyPanel('thanos_bucket_store_series_gate_duration_seconds', 'namespace="$namespace",job=~"$job"')
         )
       )
       .addRow(

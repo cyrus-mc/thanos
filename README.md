@@ -1,10 +1,14 @@
 <p align="center"><img src="docs/img/Thanos-logo_fullmedium.png" alt="Thanos Logo"></p>
 
-[![CircleCI](https://circleci.com/gh/thanos-io/thanos.svg?style=svg)](https://circleci.com/gh/thanos-io/thanos)
+[![Latest Release](https://img.shields.io/github/release/thanos-io/thanos.svg?style=flat-square)](https://github.com/thanos-io/thanos/releases/latest)
+[![CI](https://circleci.com/gh/thanos-io/thanos.svg?style=svg)](https://circleci.com/gh/thanos-io/thanos)
+[![Cross Build](https://github.com/thanos-io/thanos/workflows/cross-build/badge.svg)](https://github.com/thanos-io/thanos/actions?query=workflow%3Across-build)
+[![End-to-End Tests](https://github.com/thanos-io/thanos/workflows/e2e/badge.svg)](https://github.com/thanos-io/thanos/actions?query=workflow%3Ae2e)
 [![Go Report Card](https://goreportcard.com/badge/github.com/thanos-io/thanos)](https://goreportcard.com/report/github.com/thanos-io/thanos)
-[![GoDoc](https://godoc.org/github.com/thanos-io/thanos?status.svg)](https://godoc.org/github.com/thanos-io/thanos)
+[![Go Code reference](https://img.shields.io/badge/code%20reference-go.dev-darkblue.svg)](https://pkg.go.dev/github.com/thanos-io/thanos?tab=subdirectories)
 [![Slack](https://img.shields.io/badge/join%20slack-%23thanos-brightgreen.svg)](https://slack.cncf.io/)
 [![Netlify Status](https://api.netlify.com/api/v1/badges/664a5091-934c-4b0e-a7b6-bc12f822a590/deploy-status)](https://app.netlify.com/sites/thanos-io/deploys)
+[![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/3048/badge)](https://bestpractices.coreinfrastructure.org/projects/3048)
 
 ## Overview
 
@@ -63,7 +67,7 @@ The philosophy of Thanos and our community is borrowing much from UNIX philosoph
 
 ## Releases
 
-Master should be stable and usable. Every commit to master builds docker image named `master-<data>-<sha>` in [quay.io/thanos/thanos](https://quay.io/repository/thanos/thanos) and [thanosio/thanos dockerhub (mirror)](https://hub.docker.com/r/thanosio/thanos)
+Master should be stable and usable. Every commit to master builds docker image named `master-<date>-<sha>` in [quay.io/thanos/thanos](https://quay.io/repository/thanos/thanos) and [thanosio/thanos dockerhub (mirror)](https://hub.docker.com/r/thanosio/thanos)
 
 We also perform minor releases every 6 weeks.
 

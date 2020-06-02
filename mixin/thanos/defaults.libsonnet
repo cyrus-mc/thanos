@@ -1,33 +1,38 @@
 {
-  querier+:: {
-    jobPrefix: 'thanos-querier',
+  query+:: {
+    jobPrefix: 'thanos-query',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sQuerier' % $.dashboard.prefix,
+    title: '%(prefix)sQuery' % $.dashboard.prefix,
   },
   store+:: {
     jobPrefix: 'thanos-store',
     selector: 'job=~"%s.*"' % self.jobPrefix,
     title: '%(prefix)sStore' % $.dashboard.prefix,
   },
-  receiver+:: {
-    jobPrefix: 'thanos-receiver',
+  receive+:: {
+    jobPrefix: 'thanos-receive',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sReceiver' % $.dashboard.prefix,
+    title: '%(prefix)sReceive' % $.dashboard.prefix,
   },
-  ruler+:: {
-    jobPrefix: 'thanos-ruler',
+  rule+:: {
+    jobPrefix: 'thanos-rule',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sRuler' % $.dashboard.prefix,
+    title: '%(prefix)sRule' % $.dashboard.prefix,
   },
-  compactor+:: {
-    jobPrefix: 'thanos-compactor',
+  compact+:: {
+    jobPrefix: 'thanos-compact',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sCompactor' % $.dashboard.prefix,
+    title: '%(prefix)sCompact' % $.dashboard.prefix,
   },
   sidecar+:: {
     jobPrefix: 'thanos-sidecar',
     selector: 'job=~"%s.*"' % self.jobPrefix,
     title: '%(prefix)sSidecar' % $.dashboard.prefix,
+  },
+  bucket_replicate+:: {
+    jobPrefix: 'thanos-bucket-replicate',
+    selector: 'job=~"%s.*"' % self.jobPrefix,
+    title: '%(prefix)sBucketReplicate' % $.dashboard.prefix,
   },
   overview+:: {
     title: '%(prefix)sOverview' % $.dashboard.prefix,

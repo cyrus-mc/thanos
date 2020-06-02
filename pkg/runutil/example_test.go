@@ -1,12 +1,15 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package runutil_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/thanos-io/thanos/pkg/runutil"
 )
 

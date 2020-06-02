@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package grpc
 
 import (
@@ -14,12 +17,15 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/thanos-io/thanos/pkg/component"
+	"github.com/thanos-io/thanos/pkg/prober"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/thanos-io/thanos/pkg/tracing"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	grpc_health "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
 
@@ -35,7 +41,7 @@ type Server struct {
 }
 
 // New creates a new Server.
-func New(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer, comp component.Component, storeSrv storepb.StoreServer, opts ...Option) *Server {
+func New(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer, comp component.Component, probe *prober.GRPCProbe, storeSrv storepb.StoreServer, opts ...Option) *Server {
 	options := options{}
 	for _, o := range opts {
 		o.apply(&options)
@@ -45,11 +51,10 @@ func New(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer
 	met.EnableHandlingTimeHistogram(
 		grpc_prometheus.WithHistogramBuckets([]float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120}),
 	)
-	panicsTotal := prometheus.NewCounter(prometheus.CounterOpts{
+	panicsTotal := promauto.With(reg).NewCounter(prometheus.CounterOpts{
 		Name: "thanos_grpc_req_panics_recovered_total",
 		Help: "Total number of gRPC requests recovered from internal panic.",
 	})
-	reg.MustRegister(met, panicsTotal)
 
 	grpcPanicRecoveryHandler := func(p interface{}) (err error) {
 		panicsTotal.Inc()
@@ -78,6 +83,9 @@ func New(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer
 
 	storepb.RegisterStoreServer(s, storeSrv)
 	met.InitializeMetrics(s)
+	reg.MustRegister(met)
+
+	grpc_health.RegisterHealthServer(s, probe.HealthServer())
 
 	return &Server{
 		logger: log.With(logger, "service", "gRPC/server", "component", comp.String()),
@@ -135,8 +143,8 @@ type ReadWriteStoreServer interface {
 }
 
 // NewReadWrite creates a new server that can be written to.
-func NewReadWrite(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer, comp component.Component, storeSrv ReadWriteStoreServer, opts ...Option) *Server {
-	s := New(logger, reg, tracer, comp, storeSrv, opts...)
+func NewReadWrite(logger log.Logger, reg prometheus.Registerer, tracer opentracing.Tracer, comp component.Component, probe *prober.GRPCProbe, storeSrv ReadWriteStoreServer, opts ...Option) *Server {
+	s := New(logger, reg, tracer, comp, probe, storeSrv, opts...)
 	storepb.RegisterWriteableStoreServer(s.srv, storeSrv)
 	return s
 }

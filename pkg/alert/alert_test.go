@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package alert
 
 import (
@@ -15,6 +18,31 @@ import (
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil"
 )
+
+func TestQueue_Pop_all_Pushed(t *testing.T) {
+	qcapacity := 10
+	batchsize := 1
+	pushes := 3
+
+	q := NewQueue(
+		nil, nil, qcapacity, batchsize, nil, nil,
+	)
+	for i := 0; i < pushes; i++ {
+		q.Push([]*Alert{
+			{},
+			{},
+		})
+	}
+
+	timeoutc := make(chan struct{}, 1)
+	time.AfterFunc(time.Second, func() { timeoutc <- struct{}{} })
+	popped := 0
+	for p := q.Pop(timeoutc); p != nil; p = q.Pop(timeoutc) {
+		popped += len(p)
+	}
+
+	testutil.Equals(t, pushes*2, popped)
+}
 
 func TestQueue_Push_Relabelled(t *testing.T) {
 	q := NewQueue(

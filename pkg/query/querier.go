@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package query
 
 import (
@@ -6,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-kit/kit/log"
+	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
@@ -166,7 +170,22 @@ func aggrsFromFunc(f string) ([]storepb.Aggr, resAggr) {
 }
 
 func (q *querier) Select(params *storage.SelectParams, ms ...*labels.Matcher) (storage.SeriesSet, storage.Warnings, error) {
-	span, ctx := tracing.StartSpan(q.ctx, "querier_select")
+	if params == nil {
+		params = &storage.SelectParams{
+			Start: q.mint,
+			End:   q.maxt,
+		}
+	}
+
+	matchers := make([]string, len(ms))
+	for i, m := range ms {
+		matchers[i] = m.String()
+	}
+	span, ctx := tracing.StartSpan(q.ctx, "querier_select", opentracing.Tags{
+		"minTime":  params.Start,
+		"maxTime":  params.End,
+		"matchers": "{" + strings.Join(matchers, ",") + "}",
+	})
 	defer span.Finish()
 
 	sms, err := translateMatchers(ms...)
@@ -174,12 +193,6 @@ func (q *querier) Select(params *storage.SelectParams, ms ...*labels.Matcher) (s
 		return nil, nil, errors.Wrap(err, "convert matchers")
 	}
 
-	if params == nil {
-		params = &storage.SelectParams{
-			Start: q.mint,
-			End:   q.maxt,
-		}
-	}
 	queryAggrs, resAggr := aggrsFromFunc(params.Func)
 
 	resp := &seriesServer{ctx: ctx}

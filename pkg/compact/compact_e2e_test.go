@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package compact
 
 import (
@@ -6,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,17 +18,17 @@ import (
 
 	"github.com/go-kit/kit/log"
 	"github.com/oklog/ulid"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/tsdb"
-	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/thanos-io/thanos/pkg/objstore/objtesting"
 	"github.com/thanos-io/thanos/pkg/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
 
 func TestSyncer_GarbageCollect_e2e(t *testing.T) {
@@ -87,10 +89,15 @@ func TestSyncer_GarbageCollect_e2e(t *testing.T) {
 			testutil.Ok(t, bkt.Upload(ctx, path.Join(m.ULID.String(), metadata.MetaFilename), &buf))
 		}
 
-		metaFetcher, err := block.NewMetaFetcher(nil, 32, bkt, "", nil)
+		duplicateBlocksFilter := block.NewDeduplicateFilter()
+		metaFetcher, err := block.NewMetaFetcher(nil, 32, objstore.WithNoopInstr(bkt), "", nil, []block.MetadataFilter{
+			duplicateBlocksFilter,
+		}, nil)
 		testutil.Ok(t, err)
 
-		sy, err := NewSyncer(nil, nil, bkt, metaFetcher, 1, false, false)
+		blocksMarkedForDeletion := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
+		ignoreDeletionMarkFilter := block.NewIgnoreDeletionMarkFilter(nil, nil, 48*time.Hour)
+		sy, err := NewSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, 1, false, false)
 		testutil.Ok(t, err)
 
 		// Do one initial synchronization with the bucket.
@@ -99,7 +106,16 @@ func TestSyncer_GarbageCollect_e2e(t *testing.T) {
 
 		var rem []ulid.ULID
 		err = bkt.Iter(ctx, "", func(n string) error {
-			rem = append(rem, ulid.MustParse(n[:len(n)-1]))
+			id := ulid.MustParse(n[:len(n)-1])
+			deletionMarkFile := path.Join(id.String(), metadata.DeletionMarkFilename)
+
+			exists, err := bkt.Exists(ctx, deletionMarkFile)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				rem = append(rem, id)
+			}
 			return nil
 		})
 		testutil.Ok(t, err)
@@ -113,6 +129,7 @@ func TestSyncer_GarbageCollect_e2e(t *testing.T) {
 
 		// After another sync the changes should also be reflected in the local groups.
 		testutil.Ok(t, sy.SyncMetas(ctx))
+		testutil.Ok(t, sy.GarbageCollect(ctx))
 
 		// Only the level 3 block, the last source block in both resolutions should be left.
 		groups, err := sy.Groups()
@@ -160,10 +177,16 @@ func TestGroup_Compact_e2e(t *testing.T) {
 
 		reg := prometheus.NewRegistry()
 
-		metaFetcher, err := block.NewMetaFetcher(nil, 32, bkt, "", nil)
+		ignoreDeletionMarkFilter := block.NewIgnoreDeletionMarkFilter(logger, objstore.WithNoopInstr(bkt), 48*time.Hour)
+		duplicateBlocksFilter := block.NewDeduplicateFilter()
+		metaFetcher, err := block.NewMetaFetcher(nil, 32, objstore.WithNoopInstr(bkt), "", nil, []block.MetadataFilter{
+			ignoreDeletionMarkFilter,
+			duplicateBlocksFilter,
+		}, nil)
 		testutil.Ok(t, err)
 
-		sy, err := NewSyncer(nil, nil, bkt, metaFetcher, 5, false, false)
+		blocksMarkedForDeletion := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
+		sy, err := NewSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, 5, false, false)
 		testutil.Ok(t, err)
 
 		comp, err := tsdb.NewLeveledCompactor(ctx, reg, logger, []int64{1000, 3000}, nil)
@@ -175,6 +198,7 @@ func TestGroup_Compact_e2e(t *testing.T) {
 		// Compaction on empty should not fail.
 		testutil.Ok(t, bComp.Compact(ctx))
 		testutil.Equals(t, 0.0, promtest.ToFloat64(sy.metrics.garbageCollectedBlocks))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(sy.metrics.blocksMarkedForDeletion))
 		testutil.Equals(t, 0.0, promtest.ToFloat64(sy.metrics.garbageCollectionFailures))
 		testutil.Equals(t, 0, MetricCount(sy.metrics.compactions))
 		testutil.Equals(t, 0, MetricCount(sy.metrics.compactionRunsStarted))
@@ -263,6 +287,7 @@ func TestGroup_Compact_e2e(t *testing.T) {
 
 		testutil.Ok(t, bComp.Compact(ctx))
 		testutil.Equals(t, 5.0, promtest.ToFloat64(sy.metrics.garbageCollectedBlocks))
+		testutil.Equals(t, 5.0, promtest.ToFloat64(sy.metrics.blocksMarkedForDeletion))
 		testutil.Equals(t, 0.0, promtest.ToFloat64(sy.metrics.garbageCollectionFailures))
 		testutil.Equals(t, 4, MetricCount(sy.metrics.compactions))
 		testutil.Equals(t, 1.0, promtest.ToFloat64(sy.metrics.compactions.WithLabelValues(GroupKey(metas[0].Thanos))))
@@ -378,9 +403,9 @@ func createAndUpload(t testing.TB, bkt objstore.Bucket, blocks []blockgenSpec) (
 		var id ulid.ULID
 		var err error
 		if b.numSamples == 0 {
-			id, err = createEmptyBlock(prepareDir, b.mint, b.maxt, b.extLset, b.res)
+			id, err = e2eutil.CreateEmptyBlock(prepareDir, b.mint, b.maxt, b.extLset, b.res)
 		} else {
-			id, err = testutil.CreateBlock(ctx, prepareDir, b.series, b.numSamples, b.mint, b.maxt, b.extLset, b.res)
+			id, err = e2eutil.CreateBlock(ctx, prepareDir, b.series, b.numSamples, b.mint, b.maxt, b.extLset, b.res)
 		}
 		testutil.Ok(t, err)
 
@@ -393,55 +418,101 @@ func createAndUpload(t testing.TB, bkt objstore.Bucket, blocks []blockgenSpec) (
 	return metas
 }
 
-// createEmptyBlock produces empty block like it was the case before fix: https://github.com/prometheus/tsdb/pull/374.
-// (Prometheus pre v2.7.0).
-func createEmptyBlock(dir string, mint int64, maxt int64, extLset labels.Labels, resolution int64) (ulid.ULID, error) {
-	entropy := rand.New(rand.NewSource(time.Now().UnixNano()))
-	uid := ulid.MustNew(ulid.Now(), entropy)
+// Regression test for #2459 issue.
+func TestGarbageCollectDoesntCreateEmptyBlocksWithDeletionMarksOnly(t *testing.T) {
+	logger := log.NewLogfmtLogger(os.Stderr)
 
-	if err := os.Mkdir(path.Join(dir, uid.String()), os.ModePerm); err != nil {
-		return ulid.ULID{}, errors.Wrap(err, "close index")
-	}
+	objtesting.ForeachStore(t, func(t *testing.T, bkt objstore.Bucket) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
 
-	if err := os.Mkdir(path.Join(dir, uid.String(), "chunks"), os.ModePerm); err != nil {
-		return ulid.ULID{}, errors.Wrap(err, "close index")
-	}
+		// Generate two blocks, and then another block that covers both of them.
+		var metas []*metadata.Meta
+		var ids []ulid.ULID
 
-	w, err := index.NewWriter(context.Background(), path.Join(dir, uid.String(), "index"))
-	if err != nil {
-		return ulid.ULID{}, errors.Wrap(err, "new index")
-	}
+		for i := 0; i < 2; i++ {
+			var m metadata.Meta
 
-	if err := w.Close(); err != nil {
-		return ulid.ULID{}, errors.Wrap(err, "close index")
-	}
+			m.Version = 1
+			m.ULID = ulid.MustNew(uint64(i), nil)
+			m.Compaction.Sources = []ulid.ULID{m.ULID}
+			m.Compaction.Level = 1
 
-	m := tsdb.BlockMeta{
-		Version: 1,
-		ULID:    uid,
-		MinTime: mint,
-		MaxTime: maxt,
-		Compaction: tsdb.BlockMetaCompaction{
-			Level:   1,
-			Sources: []ulid.ULID{uid},
-		},
-	}
-	b, err := json.Marshal(&m)
-	if err != nil {
-		return ulid.ULID{}, err
-	}
+			ids = append(ids, m.ULID)
+			metas = append(metas, &m)
+		}
 
-	if err := ioutil.WriteFile(path.Join(dir, uid.String(), "meta.json"), b, os.ModePerm); err != nil {
-		return ulid.ULID{}, errors.Wrap(err, "saving meta.json")
-	}
+		var m1 metadata.Meta
+		m1.Version = 1
+		m1.ULID = ulid.MustNew(100, nil)
+		m1.Compaction.Level = 2
+		m1.Compaction.Sources = ids
+		m1.Thanos.Downsample.Resolution = 0
 
-	if _, err = metadata.InjectThanos(log.NewNopLogger(), filepath.Join(dir, uid.String()), metadata.Thanos{
-		Labels:     extLset.Map(),
-		Downsample: metadata.ThanosDownsample{Resolution: resolution},
-		Source:     metadata.TestSource,
-	}, nil); err != nil {
-		return ulid.ULID{}, errors.Wrap(err, "finalize block")
-	}
+		// Create all blocks in the bucket.
+		for _, m := range append(metas, &m1) {
+			fmt.Println("create", m.ULID)
+			var buf bytes.Buffer
+			testutil.Ok(t, json.NewEncoder(&buf).Encode(&m))
+			testutil.Ok(t, bkt.Upload(ctx, path.Join(m.ULID.String(), metadata.MetaFilename), &buf))
+		}
 
-	return uid, nil
+		blocksMarkedForDeletion := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
+		ignoreDeletionMarkFilter := block.NewIgnoreDeletionMarkFilter(nil, objstore.WithNoopInstr(bkt), 48*time.Hour)
+
+		duplicateBlocksFilter := block.NewDeduplicateFilter()
+		metaFetcher, err := block.NewMetaFetcher(nil, 32, objstore.WithNoopInstr(bkt), "", nil, []block.MetadataFilter{
+			ignoreDeletionMarkFilter,
+			duplicateBlocksFilter,
+		}, nil)
+		testutil.Ok(t, err)
+
+		sy, err := NewSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, 1, false, false)
+		testutil.Ok(t, err)
+
+		// Do one initial synchronization with the bucket.
+		testutil.Ok(t, sy.SyncMetas(ctx))
+		testutil.Ok(t, sy.GarbageCollect(ctx))
+		testutil.Equals(t, 2.0, promtest.ToFloat64(sy.metrics.garbageCollectedBlocks))
+
+		rem, err := listBlocksMarkedForDeletion(ctx, bkt)
+		testutil.Ok(t, err)
+
+		sort.Slice(rem, func(i, j int) bool {
+			return rem[i].Compare(rem[j]) < 0
+		})
+
+		testutil.Equals(t, ids, rem)
+
+		// Delete source blocks.
+		for _, id := range ids {
+			testutil.Ok(t, block.Delete(ctx, logger, bkt, id))
+		}
+
+		// After another garbage-collect, we should not find new blocks that are deleted with new deletion mark files.
+		testutil.Ok(t, sy.SyncMetas(ctx))
+		testutil.Ok(t, sy.GarbageCollect(ctx))
+
+		rem, err = listBlocksMarkedForDeletion(ctx, bkt)
+		testutil.Ok(t, err)
+		testutil.Equals(t, 0, len(rem))
+	})
+}
+
+func listBlocksMarkedForDeletion(ctx context.Context, bkt objstore.Bucket) ([]ulid.ULID, error) {
+	var rem []ulid.ULID
+	err := bkt.Iter(ctx, "", func(n string) error {
+		id := ulid.MustParse(n[:len(n)-1])
+		deletionMarkFile := path.Join(id.String(), metadata.DeletionMarkFilename)
+
+		exists, err := bkt.Exists(ctx, deletionMarkFile)
+		if err != nil {
+			return err
+		}
+		if exists {
+			rem = append(rem, id)
+		}
+		return nil
+	})
+	return rem, err
 }

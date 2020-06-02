@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package ui
 
 import (
@@ -23,7 +26,7 @@ type Query struct {
 	*BaseUI
 	storeSet *query.StoreSet
 
-	flagsMap map[string]string
+	externalPrefix, prefixHeader string
 
 	cwd   string
 	birth time.Time
@@ -40,19 +43,20 @@ type thanosVersion struct {
 	GoVersion string `json:"goVersion"`
 }
 
-func NewQueryUI(logger log.Logger, reg prometheus.Registerer, storeSet *query.StoreSet, flagsMap map[string]string) *Query {
+func NewQueryUI(logger log.Logger, reg prometheus.Registerer, storeSet *query.StoreSet, externalPrefix, prefixHeader string) *Query {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "<error retrieving current working directory>"
 	}
 	return &Query{
-		BaseUI:   NewBaseUI(logger, "query_menu.html", queryTmplFuncs()),
-		storeSet: storeSet,
-		flagsMap: flagsMap,
-		cwd:      cwd,
-		birth:    time.Now(),
-		reg:      reg,
-		now:      model.Now,
+		BaseUI:         NewBaseUI(logger, "query_menu.html", queryTmplFuncs()),
+		storeSet:       storeSet,
+		externalPrefix: externalPrefix,
+		prefixHeader:   prefixHeader,
+		cwd:            cwd,
+		birth:          time.Now(),
+		reg:            reg,
+		now:            model.Now,
 	}
 }
 
@@ -87,19 +91,19 @@ func (q *Query) Register(r *route.Router, ins extpromhttp.InstrumentationMiddlew
 
 // Root redirects "/" requests to "/graph", taking into account the path prefix value.
 func (q *Query) root(w http.ResponseWriter, r *http.Request) {
-	prefix := GetWebPrefix(q.logger, q.flagsMap, r)
+	prefix := GetWebPrefix(q.logger, q.externalPrefix, q.prefixHeader, r)
 
 	http.Redirect(w, r, path.Join(prefix, "/graph"), http.StatusFound)
 }
 
 func (q *Query) graph(w http.ResponseWriter, r *http.Request) {
-	prefix := GetWebPrefix(q.logger, q.flagsMap, r)
+	prefix := GetWebPrefix(q.logger, q.externalPrefix, q.prefixHeader, r)
 
 	q.executeTemplate(w, "graph.html", prefix, nil)
 }
 
 func (q *Query) status(w http.ResponseWriter, r *http.Request) {
-	prefix := GetWebPrefix(q.logger, q.flagsMap, r)
+	prefix := GetWebPrefix(q.logger, q.externalPrefix, q.prefixHeader, r)
 
 	q.executeTemplate(w, "status.html", prefix, struct {
 		Birth   time.Time
@@ -120,7 +124,7 @@ func (q *Query) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (q *Query) stores(w http.ResponseWriter, r *http.Request) {
-	prefix := GetWebPrefix(q.logger, q.flagsMap, r)
+	prefix := GetWebPrefix(q.logger, q.externalPrefix, q.prefixHeader, r)
 	statuses := make(map[component.StoreAPI][]query.StoreStatus)
 	for _, status := range q.storeSet.GetStoreStatus() {
 		statuses[status.StoreType] = append(statuses[status.StoreType], status)

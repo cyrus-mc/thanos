@@ -1,6 +1,8 @@
-(import 'compactor.libsonnet') +
-(import 'querier.libsonnet') +
-(import 'receiver.libsonnet') +
+(import 'compact.libsonnet') +
+(import 'query.libsonnet') +
+(import 'receive.libsonnet') +
 (import 'sidecar.libsonnet') +
 (import 'store.libsonnet') +
-(import 'absent.libsonnet')
+(import 'rule.libsonnet') +
+(import 'absent.libsonnet') +
+(import 'bucket_replicate.libsonnet')

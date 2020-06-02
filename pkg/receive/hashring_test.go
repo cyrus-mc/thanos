@@ -1,9 +1,12 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package receive
 
 import (
 	"testing"
 
-	"github.com/prometheus/prometheus/prompb"
+	"github.com/thanos-io/thanos/pkg/store/storepb/prompb"
 )
 
 func TestHash(t *testing.T) {

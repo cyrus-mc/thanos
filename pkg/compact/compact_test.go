@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package compact
 
 import (
@@ -33,6 +36,8 @@ func TestHaltMultiError(t *testing.T) {
 
 	errs.Add(haltErr)
 	testutil.Assert(t, IsHaltError(errs), "if any halt errors are present this should return true")
+	testutil.Assert(t, IsHaltError(errors.Wrap(errs, "wrap")), "halt error with wrap")
+
 }
 
 func TestRetryMultiError(t *testing.T) {

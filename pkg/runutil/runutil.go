@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 // Package runutil provides helpers to advanced function scheduling control like repeat or retry.
 //
 // It's very often the case when you need to excutes some code every fixed intervals or have it retried automatically.
@@ -105,6 +108,11 @@ func RetryWithLog(logger log.Logger, interval time.Duration, stopc <-chan struct
 func CloseWithLogOnErr(logger log.Logger, closer io.Closer, format string, a ...interface{}) {
 	err := closer.Close()
 	if err == nil {
+		return
+	}
+
+	// Not a problem if it has been closed already.
+	if errors.Is(err, os.ErrClosed) {
 		return
 	}
 

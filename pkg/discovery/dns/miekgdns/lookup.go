@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package miekgdns
 
 import (
@@ -137,7 +140,7 @@ func askServerForName(name string, qType dns.Type, client *dns.Client, servAddr 
 
 	if response.Truncated {
 		if client.Net == "tcp" {
-			return nil, errors.Errorf("got truncated message on TCP (64kiB limit exceeded?)")
+			return nil, errors.New("got truncated message on TCP (64kiB limit exceeded?)")
 		}
 
 		// TCP fallback.

@@ -249,7 +249,8 @@ Flags:
                                  --help-long and --help-man).
       --version                  Show application version.
       --log.level=info           Log filtering level.
-      --log.format=logfmt        Log format to use.
+      --log.format=logfmt        Log format to use. Possible options: logfmt or
+                                 json.
       --tracing.config-file=<file-path>
                                  Path to YAML file with tracing configuration.
                                  See format details:
@@ -326,6 +327,11 @@ Flags:
                                  prefixed with 'dns+' or 'dnssrv+' to detect
                                  store API servers through respective DNS
                                  lookups.
+      --store-strict=<staticstore> ...
+                                 Addresses of only statically configured store
+                                 API servers that are always used, even if the
+                                 health check fails. Useful if you have a
+                                 caching layer on top.
       --store.sd-files=<path> ...
                                  Path to files that contain addresses of store
                                  API servers. The path can be a glob pattern

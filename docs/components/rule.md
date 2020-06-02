@@ -25,7 +25,7 @@ $ thanos rule \
     --eval-interval        "30s" \
     --rule-file            "/path/to/rules/*.rules.yaml" \
     --alert.query-url      "http://0.0.0.0:9090" \ # This tells what query URL to link to in UI.
-    --alertmanagers.url    "alert.thanos.io" \
+    --alertmanagers.url    "http://alert.thanos.io" \
     --query                "query.example.org" \
     --query                "query2.example.org" \
     --objstore.config-file "bucket.yml" \
@@ -240,7 +240,8 @@ Flags:
                                  --help-long and --help-man).
       --version                  Show application version.
       --log.level=info           Log filtering level.
-      --log.format=logfmt        Log format to use.
+      --log.format=logfmt        Log format to use. Possible options: logfmt or
+                                 json.
       --tracing.config-file=<file-path>
                                  Path to YAML file with tracing configuration.
                                  See format details:

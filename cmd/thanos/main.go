@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package main
 
 import (
@@ -29,7 +32,7 @@ const (
 	logFormatJson   = "json"
 )
 
-type setupFunc func(*run.Group, log.Logger, *prometheus.Registry, opentracing.Tracer, bool) error
+type setupFunc func(*run.Group, log.Logger, *prometheus.Registry, opentracing.Tracer, <-chan struct{}, bool) error
 
 func main() {
 	if os.Getenv("DEBUG") != "" {
@@ -46,7 +49,7 @@ func main() {
 
 	logLevel := app.Flag("log.level", "Log filtering level.").
 		Default("info").Enum("error", "warn", "info", "debug")
-	logFormat := app.Flag("log.format", "Log format to use.").
+	logFormat := app.Flag("log.format", "Log format to use. Possible options: logfmt or json.").
 		Default(logFormatLogfmt).Enum(logFormatLogfmt, logFormatJson)
 
 	tracingConfig := regCommonTracingFlags(app)
@@ -58,7 +61,6 @@ func main() {
 	registerRule(cmds, app)
 	registerCompact(cmds, app)
 	registerBucket(cmds, app, "bucket")
-	registerDownsample(cmds, app)
 	registerReceive(cmds, app)
 	registerChecks(cmds, app, "check")
 
@@ -116,6 +118,7 @@ func main() {
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
 	)
 
+	// Some packages still use default Register. Replace to have those metrics.
 	prometheus.DefaultRegisterer = metrics
 	// Memberlist uses go-metrics.
 	sink, err := gprom.NewPrometheusSink()
@@ -175,8 +178,12 @@ func main() {
 		})
 	}
 
-	if err := cmds[cmd](&g, logger, metrics, tracer, *logLevel == "debug"); err != nil {
-		level.Error(logger).Log("err", errors.Wrapf(err, "%s command failed", cmd))
+	// Create a signal channel to dispatch reload events to sub-commands.
+	reloadCh := make(chan struct{}, 1)
+
+	if err := cmds[cmd](&g, logger, metrics, tracer, reloadCh, *logLevel == "debug"); err != nil {
+		// Use %+v for github.com/pkg/errors error to print with stack.
+		level.Error(logger).Log("err", fmt.Sprintf("%+v", errors.Wrapf(err, "preparing %s command failed", cmd)))
 		os.Exit(1)
 	}
 
@@ -190,8 +197,19 @@ func main() {
 		})
 	}
 
+	// Listen for reload signals.
+	{
+		cancel := make(chan struct{})
+		g.Add(func() error {
+			return reload(logger, cancel, reloadCh)
+		}, func(error) {
+			close(cancel)
+		})
+	}
+
 	if err := g.Run(); err != nil {
-		level.Error(logger).Log("msg", "running command failed", "err", err)
+		// Use %+v for github.com/pkg/errors error to print with stack.
+		level.Error(logger).Log("err", fmt.Sprintf("%+v", errors.Wrapf(err, "%s command failed", cmd)))
 		os.Exit(1)
 	}
 	level.Info(logger).Log("msg", "exiting")
@@ -206,5 +224,23 @@ func interrupt(logger log.Logger, cancel <-chan struct{}) error {
 		return nil
 	case <-cancel:
 		return errors.New("canceled")
+	}
+}
+
+func reload(logger log.Logger, cancel <-chan struct{}, r chan<- struct{}) error {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGHUP)
+	for {
+		select {
+		case s := <-c:
+			level.Info(logger).Log("msg", "caught signal. Reloading.", "signal", s)
+			select {
+			case r <- struct{}{}:
+				level.Info(logger).Log("msg", "relaod dispatched.")
+			default:
+			}
+		case <-cancel:
+			return errors.New("canceled")
+		}
 	}
 }

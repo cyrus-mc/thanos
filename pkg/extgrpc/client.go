@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package extgrpc
 
 import (
@@ -40,7 +43,6 @@ func StoreClientGRPCOpts(logger log.Logger, reg *prometheus.Registry, tracer ope
 			),
 		),
 	}
-
 	if reg != nil {
 		reg.MustRegister(grpcMets)
 	}

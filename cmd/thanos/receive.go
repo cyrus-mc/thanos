@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package main
 
 import (
@@ -21,6 +24,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/extgrpc"
+	"github.com/thanos-io/thanos/pkg/extprom"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/prober"
 	"github.com/thanos-io/thanos/pkg/receive"
@@ -78,7 +82,7 @@ func registerReceive(m map[string]setupFunc, app *kingpin.Application) {
 
 	walCompression := cmd.Flag("tsdb.wal-compression", "Compress the tsdb WAL.").Default("true").Bool()
 
-	m[comp.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ bool) error {
+	m[comp.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ <-chan struct{}, _ bool) error {
 		lset, err := parseFlagLabels(*labelStrs)
 		if err != nil {
 			return errors.Wrap(err, "parse labels")
@@ -187,10 +191,6 @@ func runReceive(
 	if err != nil {
 		return err
 	}
-	rwTLSClientConfig, err := tls.NewClientConfig(logger, rwClientCert, rwClientKey, rwClientServerCA, rwClientServerName)
-	if err != nil {
-		return err
-	}
 	dialOpts, err := extgrpc.StoreClientGRPCOpts(logger, reg, tracer, rwServerCert != "", rwClientCert, rwClientKey, rwClientServerCA, rwClientServerName)
 	if err != nil {
 		return err
@@ -205,11 +205,17 @@ func runReceive(
 		ReplicationFactor: replicationFactor,
 		Tracer:            tracer,
 		TLSConfig:         rwTLSConfig,
-		TLSClientConfig:   rwTLSClientConfig,
 		DialOpts:          dialOpts,
 	})
 
-	statusProber := prober.New(comp, logger, prometheus.WrapRegistererWithPrefix("thanos_", reg))
+	grpcProbe := prober.NewGRPC()
+	httpProbe := prober.NewHTTP()
+	statusProber := prober.Combine(
+		httpProbe,
+		grpcProbe,
+		prober.NewInstrumentation(comp, logger, extprom.WrapRegistererWithPrefix("thanos_", reg)),
+	)
+
 	confContentYaml, err := objStoreConfig.Content()
 	if err != nil {
 		return err
@@ -274,6 +280,9 @@ func runReceive(
 					if !ok {
 						return nil
 					}
+
+					level.Info(logger).Log("msg", "updating DB")
+
 					if err := db.Flush(); err != nil {
 						return errors.Wrap(err, "flushing storage")
 					}
@@ -288,7 +297,7 @@ func runReceive(
 					localStorage.Set(db.Get(), startTimeMargin)
 					webHandler.SetWriter(receive.NewWriter(log.With(logger, "component", "receive-writer"), localStorage))
 					statusProber.Ready()
-					level.Info(logger).Log("msg", "server is ready to receive web requests.")
+					level.Info(logger).Log("msg", "server is ready to receive web requests")
 					dbReady <- struct{}{}
 				}
 			}
@@ -305,11 +314,17 @@ func runReceive(
 		// In the single-node case, which has no configuration
 		// watcher, we close the chan ourselves.
 		updates := make(chan receive.Hashring, 1)
+
 		if cw != nil {
+			// Check the hashring configuration on before running the watcher.
+			if err := cw.ValidateConfig(); err != nil {
+				close(updates)
+				return errors.Wrap(err, "failed to validate hashring configuration file")
+			}
+
 			ctx, cancel := context.WithCancel(context.Background())
 			g.Add(func() error {
-				receive.HashringFromConfig(ctx, updates, cw)
-				return nil
+				return receive.HashringFromConfig(ctx, updates, cw)
 			}, func(error) {
 				cancel()
 			})
@@ -351,8 +366,7 @@ func runReceive(
 	}
 
 	level.Debug(logger).Log("msg", "setting up http server")
-	// Initiate HTTP listener providing metrics endpoint and readiness/liveness probes.
-	srv := httpserver.New(logger, reg, comp, statusProber,
+	srv := httpserver.New(logger, reg, comp, httpProbe,
 		httpserver.WithListen(httpBindAddr),
 		httpserver.WithGracePeriod(httpGracePeriod),
 	)
@@ -389,24 +403,22 @@ func runReceive(
 					WriteableStoreServer: webHandler,
 				}
 
-				s = grpcserver.NewReadWrite(logger, &receive.UnRegisterer{Registerer: reg}, tracer, comp, rw,
+				s = grpcserver.NewReadWrite(logger, &receive.UnRegisterer{Registerer: reg}, tracer, comp, grpcProbe, rw,
 					grpcserver.WithListen(grpcBindAddr),
 					grpcserver.WithGracePeriod(grpcGracePeriod),
 					grpcserver.WithTLSConfig(tlsCfg),
 				)
 				startGRPC <- struct{}{}
 			}
-			return nil
-		}, func(err error) {
 			if s != nil {
 				s.Shutdown(err)
 			}
-		})
+			return nil
+		}, func(error) {})
 		// We need to be able to start and stop the gRPC server
 		// whenever the DB changes, thus it needs its own run group.
 		g.Add(func() error {
 			for range startGRPC {
-				level.Info(logger).Log("msg", "listening for StoreAPI gRPC", "address", grpcBindAddr)
 				if err := s.ListenAndServe(); err != nil {
 					return errors.Wrap(err, "serve gRPC")
 				}

@@ -1,17 +1,20 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package extprom
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestTxGaugeVec(t *testing.T) {
-	g := NewTxGaugeVec(prometheus.GaugeOpts{
+	g := NewTxGaugeVec(nil, prometheus.GaugeOpts{
 		Name: "metric",
 	}, []string{"a", "b"}, []string{"a1", "b1"}, []string{"a2", "b2"})
 
@@ -164,7 +167,7 @@ func toFloat64(t *testing.T, c prometheus.Collector) map[string]float64 {
 		if pb.Untyped != nil {
 			exp[lbToString(pb.GetLabel())] = pb.Untyped.GetValue()
 		}
-		panic(fmt.Errorf("collected a non-gauge/counter/untyped metric: %s", pb))
+		panic(errors.Errorf("collected a non-gauge/counter/untyped metric: %s", pb))
 	}
 
 	return exp
