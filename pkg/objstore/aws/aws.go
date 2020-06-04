@@ -316,11 +316,14 @@ func (b *Bucket) guessFileSize(name string, r io.Reader) int64 {
 
 // Upload the contents of the reader as an object into the bucket.
 func (b *Bucket) Upload(ctx context.Context, name string, r io.Reader) error {
-	// TODO(https://github.com/thanos-io/thanos/issues/678): Remove guessing length when minio provider will support multipart upload without this.
-	size := b.guessFileSize(name, r)
+	size, err := objstore.TryToGetSize(r)
+	if err != nil {
+		level.Warn(b.logger).Log("msg", "could not guess file size for multipart upload; upload might be not optimized", "name", name, "err", err)
+		size = -1
+	}
 
 	buffer := make([]byte, size)
-	_, err := r.Read(buffer)
+	_, err = r.Read(buffer)
 	if err != nil {
 		return errors.Wrap(err, "Upload: failed to read file into buffer")
 	}
