@@ -6,7 +6,7 @@ menu: components
 
 # Querier/Query
 
-The Querier component (also known as "Query") implements the [Prometheus HTTP v1 API](https://prometheus.io/docs/prometheus/latest/querying/api/) to query data in a Thanos cluster via PromQL.
+The `thanos query` command (also known as "Querier") implements the [Prometheus HTTP v1 API](https://prometheus.io/docs/prometheus/latest/querying/api/) to query data in a Thanos cluster via PromQL.
 
 In short, it gathers the data needed to evaluate the query from underlying [StoreAPIs](../../pkg/store/storepb/rpc.proto), evaluates the query and returns the result.
 
@@ -15,7 +15,7 @@ Querier is fully stateless and horizontally scalable.
 Example command to run Querier:
 
 ```bash
-$ thanos query \
+thanos query \
     --http-address     "0.0.0.0:9090" \
     --store            "<store-api>:<grpc-port>" \
     --store            "<store-api2>:<grpc-port>"
@@ -28,10 +28,10 @@ Thanos Querier essentially allows to aggregate and optionally deduplicate multip
 
 Since for Querier "a backend" is anything that implements gRPC StoreAPI we can aggregate data from any number of the different storages like:
 
-* Prometheus (see [Sidecar](sidecar.md))
-* Object Storage (see [Store Gateway](store.md))
-* Global alerting/recording rules evaluations (see [Ruler](rule.md))
-* Metrics received from Prometheus remote write streams (see [Thanos Receiver](../proposals/201812_thanos-remote-receive.md))
+* Prometheus (see [Sidecar](./sidecar.md))
+* Object Storage (see [Store Gateway](./store.md))
+* Global alerting/recording rules evaluations (see [Ruler](./rule.md))
+* Metrics received from Prometheus remote write streams (see [Receiver](./receive.md))
 * Another Querier (you can stack Queriers on top of each other)
 * Non-Prometheus systems!
     * e.g [OpenTSDB](../integrations.md#opentsdb)
@@ -81,7 +81,7 @@ This also hides gaps in collection of a single data source.
 If we configure Querier like this:
 
 ```
-$ thanos query \
+thanos query \
     --http-address        "0.0.0.0:9090" \
     --query.replica-label "replica" \
     --store               "<store-api>:<grpc-port>" \
@@ -106,7 +106,7 @@ WITHOUT this replica flag (deduplication turned off), we will get 3 results:
 * Prometheus + sidecar "A" in different cluster: `cluster=2,env=2,replica=A,replicaX=A`
 
 ```
-$ thanos query \
+thanos query \
     --http-address        "0.0.0.0:9090" \
     --query.replica-label "replica" \
     --query.replica-label "replicaX" \
@@ -216,6 +216,32 @@ type queryData struct {
 Additional field is `Warnings` that contains every error that occurred that is assumed non critical. `partial_response`
 option controls if storeAPI unavailability is considered critical.
 
+### Concurrent Selects
+
+Thanos Querier has the ability to perform concurrent select request per query. It dissects given PromQL statement and executes selectors concurrently against the discovered StoreAPIs.
+The maximum number of concurrent requests are being made per query is controller by `query.max-concurrent-select` flag.
+Keep in mind that the maximum number of concurrent queries that are handled by querier is controlled by `query.max-concurrent`. Please consider implications of combined value while tuning the querier.
+
+### Store filtering
+
+It's possible to provide a set of matchers to the Querier api to select specific stores to be used during the query using the `storeMatch[]` parameter. It is useful when debugging a slow/broken store.
+It uses the same format as the matcher of [Prometheus' federate api](https://prometheus.io/docs/prometheus/latest/querying/api/#finding-series-by-label-matchers).
+Note that at the moment the querier only supports the `__address__` which contain the address of the store as it is shown on the `/stores` endpoint of the UI.
+
+Example:
+```
+- targets:
+  - prometheus-foo.thanos-sidecar:10901
+  - prometheus-bar.thanos-sidecar:10901
+```
+
+```
+http://localhost:10901/api/v1/query?query=up&dedup=true&partial_response=true&storeMatch[]={__address__=~"prometheus-foo.*"}
+```
+
+Will only return metrics from `prometheus-foo.thanos-sidecar:10901`
+
+
 ## Expose UI on a sub-path
 
 It is possible to expose thanos-query UI and optionally API on a sub-path.
@@ -228,11 +254,30 @@ Additionally, Thanos supports dynamic prefix configuration, which
 [is not yet implemented by Prometheus](https://github.com/prometheus/prometheus/issues/3156).
 Dynamic prefixing simplifies setup when `thanos query` is exposed on a sub-path behind
 a reverse proxy, for example, via a Kubernetes ingress controller
-[Traefik](https://docs.traefik.io/basics/#frontends)
+[Traefik](https://docs.traefik.io/routing/routers/)
 or [nginx](https://github.com/kubernetes/ingress-nginx/pull/1805).
 If `PathPrefixStrip: /some-path` option or `traefik.frontend.rule.type: PathPrefixStrip`
 Kubernetes Ingress annotation is set, then `Traefik` writes the stripped prefix into X-Forwarded-Prefix header.
 Then, `thanos query --web.prefix-header=X-Forwarded-Prefix` will serve correct HTTP redirects and links prefixed by the stripped path.
+
+## File SD
+
+`--store.sd-file` flag provides a path to a JSON or YAML formatted file, which contains a list of targets in [Prometheus target format](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#file_sd_config).
+
+Example file SD file in YAML:
+
+```
+- targets:
+  - prometheus-0.thanos-sidecar:10901
+  - prometheus-1.thanos-sidecar:10901
+  - thanos-store:10901
+  - thanos-short-store:10901
+  - thanos-rule:10901
+- targets:
+  - prometheus-0.thanos-sidecar.infra:10901
+  - prometheus-1.thanos-sidecar.infra:10901
+  - thanos-store.infra:10901
+```
 
 
 ## Flags
@@ -254,12 +299,12 @@ Flags:
       --tracing.config-file=<file-path>
                                  Path to YAML file with tracing configuration.
                                  See format details:
-                                 https://thanos.io/tracing.md/#configuration
+                                 https://thanos.io/tip/tracing.md/#configuration
       --tracing.config=<content>
                                  Alternative to 'tracing.config-file' flag
                                  (lower priority). Content of YAML file with
                                  tracing configuration. See format details:
-                                 https://thanos.io/tracing.md/#configuration
+                                 https://thanos.io/tip/tracing.md/#configuration
       --http-address="0.0.0.0:10902"
                                  Listen host:port for HTTP endpoints.
       --http-grace-period=2m     Time to wait after an interrupt received for
@@ -289,9 +334,10 @@ Flags:
                                  returned gRPC certificates. See
                                  https://tools.ietf.org/html/rfc4366#section-3.1
       --web.route-prefix=""      Prefix for API and UI endpoints. This allows
-                                 thanos UI to be served on a sub-path. This
+                                 thanos UI to be served on a sub-path. Defaults
+                                 to the value of --web.external-prefix. This
                                  option is analogous to --web.route-prefix of
-                                 Promethus.
+                                 Prometheus.
       --web.external-prefix=""   Static prefix for all HTML links and redirect
                                  URLs in the UI query web interface. Actual
                                  endpoints are still served on / or the
@@ -311,14 +357,38 @@ Flags:
                                  stripped prefix value in X-Forwarded-Prefix
                                  header. This allows thanos UI to be served on a
                                  sub-path.
+      --log.request.decision=LogFinishCall
+                                 Request Logging for logging the start and end
+                                 of requests. LogFinishCall is enabled by
+                                 default. LogFinishCall : Logs the finish call
+                                 of the requests. LogStartAndFinishCall : Logs
+                                 the start and finish call of the requests.
+                                 NoLogCall : Disable request logging.
       --query.timeout=2m         Maximum time to process query by query node.
       --query.max-concurrent=20  Maximum number of queries processed
                                  concurrently by query node.
+      --query.lookback-delta=QUERY.LOOKBACK-DELTA
+                                 The maximum lookback duration for retrieving
+                                 metrics during expression evaluations. PromQL
+                                 always evaluates the query for the certain
+                                 timestamp (query range timestamps are deduced
+                                 by step). Since scrape intervals might be
+                                 different, PromQL looks back for given amount
+                                 of time to get latest sample. If it exceeds the
+                                 maximum lookback delta it assumes series is
+                                 stale and returns none (a gap). This is why
+                                 lookback delta should be set to at least 2
+                                 times of the slowest scrape interval. If unset
+                                 it will use the promql default of 5m.
+      --query.max-concurrent-select=4
+                                 Maximum number of select requests made
+                                 concurrently per a query.
       --query.replica-label=QUERY.REPLICA-LABEL ...
                                  Labels to treat as a replica indicator along
                                  which data is deduplicated. Still you will be
                                  able to query without deduplication using
-                                 'dedup=false' parameter.
+                                 'dedup=false' parameter. Data includes time
+                                 series, recording rules, and alerting rules.
       --selector-label=<name>="<value>" ...
                                  Query selector labels that will be exposed in
                                  info endpoint (repeated).

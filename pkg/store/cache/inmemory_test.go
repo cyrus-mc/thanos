@@ -10,9 +10,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
-	"time"
 
-	"github.com/fortytw2/leaktest"
 	"github.com/go-kit/kit/log"
 	"github.com/hashicorp/golang-lru/simplelru"
 	"github.com/oklog/ulid"
@@ -23,8 +21,6 @@ import (
 )
 
 func TestNewInMemoryIndexCache(t *testing.T) {
-	defer leaktest.CheckTimeout(t, 10*time.Second)()
-
 	// Should return error on invalid YAML config.
 	conf := []byte("invalid")
 	cache, err := NewInMemoryIndexCache(log.NewNopLogger(), nil, conf)
@@ -51,8 +47,6 @@ max_item_size: 2KB
 }
 
 func TestInMemoryIndexCache_AvoidsDeadlock(t *testing.T) {
-	defer leaktest.CheckTimeout(t, 10*time.Second)()
-
 	metrics := prometheus.NewRegistry()
 	cache, err := NewInMemoryIndexCacheWithConfig(log.NewNopLogger(), metrics, InMemoryIndexCacheConfig{
 		MaxItemSize: sliceHeaderSize + 5,
@@ -85,8 +79,6 @@ func TestInMemoryIndexCache_AvoidsDeadlock(t *testing.T) {
 }
 
 func TestInMemoryIndexCache_UpdateItem(t *testing.T) {
-	defer leaktest.CheckTimeout(t, 10*time.Second)()
-
 	const maxSize = 2 * (sliceHeaderSize + 1)
 
 	var errorLogs []string
@@ -190,8 +182,6 @@ func TestInMemoryIndexCache_UpdateItem(t *testing.T) {
 
 // This should not happen as we hardcode math.MaxInt, but we still add test to check this out.
 func TestInMemoryIndexCache_MaxNumberOfItemsHit(t *testing.T) {
-	defer leaktest.CheckTimeout(t, 10*time.Second)()
-
 	metrics := prometheus.NewRegistry()
 	cache, err := NewInMemoryIndexCacheWithConfig(log.NewNopLogger(), metrics, InMemoryIndexCacheConfig{
 		MaxItemSize: 2*sliceHeaderSize + 10,
@@ -224,8 +214,6 @@ func TestInMemoryIndexCache_MaxNumberOfItemsHit(t *testing.T) {
 }
 
 func TestInMemoryIndexCache_Eviction_WithMetrics(t *testing.T) {
-	defer leaktest.CheckTimeout(t, 10*time.Second)()
-
 	metrics := prometheus.NewRegistry()
 	cache, err := NewInMemoryIndexCacheWithConfig(log.NewNopLogger(), metrics, InMemoryIndexCacheConfig{
 		MaxItemSize: 2*sliceHeaderSize + 5,
@@ -260,7 +248,7 @@ func TestInMemoryIndexCache_Eviction_WithMetrics(t *testing.T) {
 	testutil.Equals(t, float64(0), promtest.ToFloat64(cache.evicted.WithLabelValues(cacheTypeSeries)))
 
 	pHits, pMisses = cache.FetchMultiPostings(ctx, id, []labels.Label{lbls})
-	testutil.Equals(t, map[labels.Label][]byte{lbls: []byte{42, 33}}, pHits, "key exists")
+	testutil.Equals(t, map[labels.Label][]byte{lbls: {42, 33}}, pHits, "key exists")
 	testutil.Equals(t, emptyPostingsMisses, pMisses)
 
 	pHits, pMisses = cache.FetchMultiPostings(ctx, ulid.MustNew(1, nil), []labels.Label{lbls})
@@ -286,7 +274,7 @@ func TestInMemoryIndexCache_Eviction_WithMetrics(t *testing.T) {
 	testutil.Equals(t, float64(0), promtest.ToFloat64(cache.evicted.WithLabelValues(cacheTypeSeries)))
 
 	sHits, sMisses := cache.FetchMultiSeries(ctx, id, []uint64{1234})
-	testutil.Equals(t, map[uint64][]byte{1234: []byte{222, 223, 224}}, sHits, "key exists")
+	testutil.Equals(t, map[uint64][]byte{1234: {222, 223, 224}}, sHits, "key exists")
 	testutil.Equals(t, emptySeriesMisses, sMisses)
 
 	lbls2 := labels.Label{Name: "test", Value: "124"}
@@ -391,7 +379,7 @@ func TestInMemoryIndexCache_Eviction_WithMetrics(t *testing.T) {
 	testutil.Equals(t, float64(1), promtest.ToFloat64(cache.evicted.WithLabelValues(cacheTypeSeries)))
 
 	pHits, pMisses = cache.FetchMultiPostings(ctx, id, []labels.Label{lbls3})
-	testutil.Equals(t, map[labels.Label][]byte{lbls3: []byte{}}, pHits, "key exists")
+	testutil.Equals(t, map[labels.Label][]byte{lbls3: {}}, pHits, "key exists")
 	testutil.Equals(t, emptyPostingsMisses, pMisses)
 
 	// nil works and still allocates empty slice.
@@ -411,7 +399,7 @@ func TestInMemoryIndexCache_Eviction_WithMetrics(t *testing.T) {
 	testutil.Equals(t, float64(1), promtest.ToFloat64(cache.evicted.WithLabelValues(cacheTypeSeries)))
 
 	pHits, pMisses = cache.FetchMultiPostings(ctx, id, []labels.Label{lbls4})
-	testutil.Equals(t, map[labels.Label][]byte{lbls4: []byte{}}, pHits, "key exists")
+	testutil.Equals(t, map[labels.Label][]byte{lbls4: {}}, pHits, "key exists")
 	testutil.Equals(t, emptyPostingsMisses, pMisses)
 
 	// Other metrics.

@@ -10,17 +10,17 @@ But before that, let's take a closer look at what the Querier component does:
 ## Querier
 
 The Querier component (also called "Query") is essentially a vanilla PromQL Prometheus engine that fetches the data from any service
-that implements Thanos [StoreAPI](https://thanos.io/integrations.md/#storeapi). This means that Querier exposes the Prometheus HTTP v1 API to query the data in a common PromQL language.
+that implements Thanos [StoreAPI](https://thanos.io/tip/integrations.md/#storeapi). This means that Querier exposes the Prometheus HTTP v1 API to query the data in a common PromQL language.
 This allows compatibility with Grafana or other consumers of Prometheus' API.
 
 Additionally, Querier is capable of deduplicating StoreAPIs that are in the same HA group. We will see how it
 looks in practice later on.
 
-You can read more about Thanos Querier [here](https://thanos.io/components/query.md/)
+You can read more about Thanos Querier [here](https://thanos.io/tip/components/query.md/)
 
 ## Deploying Thanos Querier
 
-Let' now start the Query component. As you remember [Thanos sidecar](https://thanos.io/components/query.md/) exposes `StoreAPI`
+Let' now start the Query component. As you remember [Thanos sidecar](https://thanos.io/tip/components/query.md/) exposes `StoreAPI`
 so we will make sure we point the Querier to the gRPC endpoints of all our three sidecars:
 
 Click below snippet to start the Querier.
@@ -28,7 +28,7 @@ Click below snippet to start the Querier.
 ```
 docker run -d --net=host --rm \
     --name querier \
-    quay.io/thanos/thanos:v0.12.2 \
+    quay.io/thanos/thanos:v0.13.0 \
     query \
     --http-address 0.0.0.0:29090 \
     --query.replica-label replica \
@@ -55,7 +55,7 @@ It's just enough to query Querier for <a href="https://[[HOST_SUBDOMAIN]]-29090-
 
 You should see the single value representing the number of series scraped in both clusters in the current mode.
 
-If we will query `prometheus_tsdb_head_series` we will see that we have complete info about all three Prometheus instances:
+If we query `prometheus_tsdb_head_series` we will see that we have complete info about all three Prometheus instances:
 
 ```
 prometheus_tsdb_head_series{cluster="eu1",instance="127.0.0.1:9090",job="prometheus"}
@@ -63,7 +63,7 @@ prometheus_tsdb_head_series{cluster="us1",instance="127.0.0.1:9091",job="prometh
 prometheus_tsdb_head_series{cluster="us1",instance="127.0.0.1:9092",job="prometheus"}
 ```
 
-## Handling of Highly Availabile Prometheus
+## Handling of Highly Available Prometheus
 
 Now, as you remember we configured Prometheus 0 US1 and Prometheus 1 US1 to scrape the same things. We also connect Querier
 to both, so how Querier knows what is an HA group?
