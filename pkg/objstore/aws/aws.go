@@ -433,14 +433,18 @@ func (b *Bucket) abortMultipartUpload(svc *s3.S3, resp *s3.CreateMultipartUpload
 	return err
 }
 
-// ObjectSize returns the size of the specified object.
-func (b *Bucket) ObjectSize(ctx context.Context, name string) (uint64, error) {
+// Attributes returns information about the specified object.
+func (b *Bucket) Attributes(ctx context.Context, name string) (objstore.ObjectAttributes, error) {
+	//objInfo, err := b.client.StatObject(ctx, b.name, name, minio.StatObjectOptions{})
 	objInfo, err := b.client.HeadObject(&s3.HeadObjectInput{Bucket: &b.name, Key: &name})
-
 	if err != nil {
-		return 0, err
+		return objstore.ObjectAttributes{}, err
 	}
-	return uint64(*objInfo.ContentLength), nil
+
+	return objstore.ObjectAttributes{
+		Size:         *objInfo.ContentLength,
+		LastModified: *objInfo.LastModified,
+	}, nil
 }
 
 // Delete removes the object with the given name.
